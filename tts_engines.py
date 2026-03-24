@@ -257,7 +257,7 @@ class Qwen3TTSEngine(TTSEngine):
             if transcript:
                 audio = self.model.generate_voice_clone(
                     text=text,
-                    language="en",
+                    language="english",
                     reference_audio=voice_path,
                     reference_transcript=transcript
                 )
@@ -265,14 +265,14 @@ class Qwen3TTSEngine(TTSEngine):
                 # Fallback to custom voice without cloning
                 audio = self.model.generate_custom_voice(
                     text=text,
-                    language="en",
+                    language="english",
                     speaker=self.speaker
                 )
         else:
             # Use built-in speaker
             audio = self.model.generate_custom_voice(
                 text=text,
-                language="en",
+                language="english",
                 speaker=self.speaker
             )
 
