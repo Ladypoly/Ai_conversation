@@ -1,0 +1,73 @@
+# Virtual Environment
+venv_voice_ai/
+venv/
+env/
+.venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+*.manifest
+*.spec
+
+# User-specific configs (contain personal preferences/prompts)
+user_config.json
+runtime_config.py
+
+# Voice models (user-trained, large files)
+voices/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.sublime-workspace
+*.sublime-project
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+nul
+
+# Logs and caches
+*.log
+logs/
+.cache/
+*.cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.tox/
+.nox/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+~*
+
+# Audio files (outputs, samples - can be large)
+*.wav
+*.mp3
+*.flac
+*.ogg
+!voices/.gitkeep
