@@ -1557,8 +1557,36 @@ class SimplifiedVoiceChat:
         self.log("status", "Running - Hold SPACE to speak" if self.input_mode == "ptt" else "Running - Listening...")
 
     def cleanup(self):
+        """Clean up all resources and free GPU memory"""
+        import gc
+        import torch
+
+        self.log("system", "[DEBUG] Cleaning up resources...")
+
+        # Stop audio recorder
         if self.audio_recorder:
             self.audio_recorder.stop_stream()
+            self.audio_recorder = None
+
+        # Unload TTS engine
+        if self.tts_engine:
+            self.log("system", "[DEBUG] Unloading TTS engine...")
+            self.tts_engine.unload()
+            self.tts_engine = None
+
+        # Unload WhisperX model
+        if self.whisper_model:
+            self.log("system", "[DEBUG] Unloading WhisperX model...")
+            del self.whisper_model
+            self.whisper_model = None
+
+        # Force CUDA memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        gc.collect()
+        self.log("system", "[DEBUG] Cleanup complete, GPU memory freed")
 
 
 def main():

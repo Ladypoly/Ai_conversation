@@ -25,6 +25,11 @@ class TTSEngine(ABC):
         pass
 
     @abstractmethod
+    def unload(self) -> None:
+        """Unload the TTS model and free GPU memory"""
+        pass
+
+    @abstractmethod
     def synthesize(self, text: str, voice_path: Optional[str] = None) -> np.ndarray:
         """
         Synthesize speech from text.
@@ -146,6 +151,31 @@ class MOSSTTSEngine(TTSEngine):
         self.inferencer._load_audio = lambda audio_path, target_sample_rate: _load_audio_soundfile(audio_path, target_sample_rate)
         self.loaded = True
 
+    def unload(self) -> None:
+        """Unload MOSS-TTS model and free GPU memory"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        if self.inferencer is not None:
+            del self.inferencer
+            self.inferencer = None
+        if self.codec is not None:
+            del self.codec
+            self.codec = None
+        if self.tokenizer is not None:
+            del self.tokenizer
+            self.tokenizer = None
+        self.loaded = False
+
+        # Force CUDA memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        import gc
+        gc.collect()
+        print("[DEBUG] MOSS-TTS unloaded, GPU memory freed")
+
     def synthesize(self, text: str, voice_path: Optional[str] = None) -> np.ndarray:
         self.load()
 
@@ -244,6 +274,22 @@ class Qwen3TTSEngine(TTSEngine):
 
         print(f"[DEBUG] Qwen3-TTS model loaded successfully")
         self.loaded = True
+
+    def unload(self) -> None:
+        """Unload Qwen3-TTS model and free GPU memory"""
+        if self.model is not None:
+            del self.model
+            self.model = None
+        self.loaded = False
+
+        # Force CUDA memory cleanup
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        import gc
+        gc.collect()
+        print("[DEBUG] Qwen3-TTS unloaded, GPU memory freed")
 
     def synthesize(self, text: str, voice_path: Optional[str] = None) -> np.ndarray:
         self.load()
