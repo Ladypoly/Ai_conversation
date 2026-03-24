@@ -23,6 +23,10 @@ import subprocess
 
 CONFIG_FILE = "user_config.json"
 
+# TTS Engine options
+TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS"]
+QWEN3_SPEAKERS = ["Chelsie", "Ethan", "Airi", "Zara", "Rafaela", "Sky", "Theo", "Nova", "Harper"]
+
 DEFAULT_PERSONAS = {
     "Helpful Assistant": "You are a helpful voice assistant. Keep your responses concise and conversational - aim for 1-3 sentences unless more detail is needed. Be friendly and natural.",
     "Coding Buddy": "You are a friendly coding assistant. Help with programming questions, explain concepts simply, and suggest solutions. Keep responses brief and conversational since this is a voice interface.",
@@ -154,7 +158,9 @@ class VoiceChatApp:
             "ollama_model": self.ollama_var.get(),
             "voice": self.voice_var.get(),
             "fast_mode": self.fast_mode_var.get(),
-            "streaming_mode": self.streaming_mode_var.get()
+            "streaming_mode": self.streaming_mode_var.get(),
+            "tts_engine": self.tts_engine_var.get(),
+            "qwen3_speaker": self.qwen3_speaker_var.get()
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
@@ -237,6 +243,26 @@ class VoiceChatApp:
         # Streaming mode checkbox (streams LLM->TTS for faster first response)
         self.streaming_mode_var = tk.BooleanVar(value=self.saved_config.get("streaming_mode", True))
         ttk.Checkbutton(row2, text="Streaming", variable=self.streaming_mode_var).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Row 3 - TTS Engine selection
+        row3 = ttk.Frame(self.settings_frame)
+        row3.pack(fill=tk.X, pady=2)
+
+        ttk.Label(row3, text="TTS Engine:").pack(side=tk.LEFT)
+        self.tts_engine_var = tk.StringVar(value=self.saved_config.get("tts_engine", "MOSS-TTS"))
+        self.tts_engine_combo = ttk.Combobox(row3, textvariable=self.tts_engine_var,
+                                              values=TTS_ENGINE_OPTIONS, state="readonly", width=12)
+        self.tts_engine_combo.pack(side=tk.LEFT, padx=5)
+        self.tts_engine_combo.bind("<<ComboboxSelected>>", self.on_tts_engine_change)
+
+        # Qwen3-TTS Speaker selector (only visible when Qwen3-TTS selected)
+        self.qwen3_speaker_label = ttk.Label(row3, text="Speaker:")
+        self.qwen3_speaker_var = tk.StringVar(value=self.saved_config.get("qwen3_speaker", "Chelsie"))
+        self.qwen3_speaker_combo = ttk.Combobox(row3, textvariable=self.qwen3_speaker_var,
+                                                 values=QWEN3_SPEAKERS, state="readonly", width=10)
+
+        # Show/hide speaker based on current engine selection
+        self.on_tts_engine_change()
 
         # System prompt
         prompt_frame = ttk.LabelFrame(self.settings_frame, text="System Prompt", padding="2")
@@ -426,6 +452,18 @@ class VoiceChatApp:
             else:
                 self.voice_var.set("Default (No Clone)")
 
+    def on_tts_engine_change(self, event=None):
+        """Handle TTS engine selection change - show/hide speaker selector"""
+        engine = self.tts_engine_var.get()
+        if engine == "Qwen3-TTS":
+            # Show speaker selector
+            self.qwen3_speaker_label.pack(side=tk.LEFT, padx=(15, 0))
+            self.qwen3_speaker_combo.pack(side=tk.LEFT, padx=5)
+        else:
+            # Hide speaker selector
+            self.qwen3_speaker_label.pack_forget()
+            self.qwen3_speaker_combo.pack_forget()
+
     def refresh_llms(self):
         """Refresh the list of available Ollama models"""
         models = get_ollama_models()
@@ -521,11 +559,15 @@ class VoiceChatApp:
         else:
             voice_path = VOICE_OPTIONS.get(voice_selection)
 
+        # Get TTS engine settings
+        tts_engine = self.tts_engine_var.get()
+        qwen3_speaker = self.qwen3_speaker_var.get()
+
         # Start chat thread
         self.chat_running = True
         self.chat_thread = threading.Thread(
             target=self.run_chat_loop,
-            args=(system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path),
+            args=(system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path, tts_engine, qwen3_speaker),
             daemon=True
         )
         self.chat_thread.start()
@@ -547,7 +589,7 @@ class VoiceChatApp:
         self.output_queue.put(("system", "Chat stopped by user"))
         self.set_status("Stopped - Click Start to begin again", "gray")
 
-    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None):
+    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None, tts_engine="MOSS-TTS", qwen3_speaker="Chelsie"):
         """Run the voice chat loop in a background thread"""
         try:
             import torch
@@ -565,6 +607,9 @@ class VoiceChatApp:
             self.output_queue.put(("status", "Loading models..."))
             self.output_queue.put(("system", f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}"))
             self.output_queue.put(("system", f"LLM: {ollama_model}"))
+            self.output_queue.put(("system", f"TTS Engine: {tts_engine}"))
+            if tts_engine == "Qwen3-TTS":
+                self.output_queue.put(("system", f"Qwen3 Speaker: {qwen3_speaker}"))
             if trained_model_path:
                 self.output_queue.put(("system", f"Using trained voice model: {os.path.basename(trained_model_path)}"))
 
@@ -581,7 +626,9 @@ class VoiceChatApp:
                 voice_path=voice_path,
                 fast_mode=fast_mode,
                 trained_model_path=trained_model_path,
-                streaming_mode=streaming_enabled
+                streaming_mode=streaming_enabled,
+                tts_engine=tts_engine,
+                qwen3_speaker=qwen3_speaker
             )
             self.voice_chat = chat
 
@@ -951,7 +998,7 @@ class VoiceChatApp:
 class SimplifiedVoiceChat:
     """Simplified voice chat that reports to the UI"""
 
-    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True):
+    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True, tts_engine="MOSS-TTS", qwen3_speaker="Chelsie"):
         import torch
         self.output_queue = output_queue
         self.system_prompt = system_prompt
@@ -965,6 +1012,11 @@ class SimplifiedVoiceChat:
         self.streaming_mode = streaming_mode  # Enable streaming LLM->TTS for faster first response
         self.running = True
         self.conversation_history = []
+
+        # TTS engine settings
+        self.tts_engine_name = tts_engine
+        self.qwen3_speaker = qwen3_speaker
+        self.tts_engine = None  # Will be loaded lazily
 
         # Models
         self.whisper_model_name = whisper_model
@@ -1016,8 +1068,8 @@ class SimplifiedVoiceChat:
         except Exception as e:
             self.log("error", f"Warning: Could not warm up LLM: {e}")
 
-        # 3. Load MOSS-TTS
-        self.log("status", "Initializing: Loading MOSS-TTS...")
+        # 3. Load TTS Engine
+        self.log("status", f"Initializing: Loading {self.tts_engine_name}...")
         self.load_tts()
 
         self.log("system", "All models loaded - Ready!")
@@ -1034,72 +1086,35 @@ class SimplifiedVoiceChat:
             self.log("system", f"WhisperX {self.whisper_model_name} loaded")
 
     def load_tts(self):
-        if self.tts_model is None:
+        if self.tts_engine is None:
             import torch
-            import importlib.util
-            self.log("status", "Loading MOSS-TTS...")
+            self.log("status", f"Loading {self.tts_engine_name}...")
 
-            from transformers import AutoModel, AutoTokenizer
-            from mossttsrealtime.modeling_mossttsrealtime import MossTTSRealtime
-            from inferencer import MossTTSRealtimeInference
+            from tts_engines import create_tts_engine
 
-            # Use trained model path if available, otherwise use default
-            if self.trained_model_path and os.path.exists(self.trained_model_path):
-                model_path = self.trained_model_path
-                self.log("system", f"Loading trained model from {model_path}")
+            # Create the TTS engine based on selection
+            if self.tts_engine_name == "Qwen3-TTS":
+                self.tts_engine = create_tts_engine(
+                    self.tts_engine_name,
+                    device=self.device,
+                    dtype=self.dtype,
+                    speaker=self.qwen3_speaker
+                )
             else:
-                model_path = "OpenMOSS-Team/MOSS-TTS-Realtime"
+                # MOSS-TTS
+                self.tts_engine = create_tts_engine(
+                    self.tts_engine_name,
+                    device=self.device,
+                    dtype=self.dtype
+                )
 
-            codec_path = "OpenMOSS-Team/MOSS-Audio-Tokenizer"
-
-            attn_impl = "sdpa"
-            if self.device == "cuda" and importlib.util.find_spec("flash_attn"):
-                major, _ = torch.cuda.get_device_capability()
-                if major >= 8:
-                    attn_impl = "flash_attention_2"
-
-            self.tts_model = MossTTSRealtime.from_pretrained(
-                model_path, attn_implementation=attn_impl, torch_dtype=self.dtype
-            ).to(self.device).eval()  # Set to eval mode
-
-            tokenizer = AutoTokenizer.from_pretrained(model_path)
-
-            self.tts_codec = AutoModel.from_pretrained(
-                codec_path, trust_remote_code=True
-            ).eval().to(self.device)
-
-            self.tts_inferencer = MossTTSRealtimeInference(
-                model=self.tts_model,
-                tokenizer=tokenizer,
-                max_length=2048,  # Reduced from 5000 for faster inference
-                codec=self.tts_codec,
-                codec_sample_rate=24000,
-                codec_encode_kwargs={"chunk_duration": 8}
-            )
-
-            # Patch _load_audio to use soundfile instead of torchaudio
-            # (torchaudio uses torchcodec which requires FFmpeg shared libs)
-            import torchaudio
-
-            def _load_audio_soundfile(audio_path: str, target_sample_rate: int) -> torch.Tensor:
-                import soundfile as sf_load
-                audio_data, sr = sf_load.read(audio_path)
-                wav = torch.from_numpy(audio_data).float()
-                if wav.ndim == 1:
-                    wav = wav.unsqueeze(0)
-                elif wav.ndim == 2 and wav.shape[1] < wav.shape[0]:
-                    wav = wav.T
-                if sr != target_sample_rate:
-                    wav = torchaudio.functional.resample(wav, sr, target_sample_rate)
-                if wav.ndim == 2 and wav.shape[0] > 1:
-                    wav = wav.mean(dim=0, keepdim=True)
-                return wav
-
-            self.tts_inferencer._load_audio = lambda audio_path, target_sample_rate: _load_audio_soundfile(audio_path, target_sample_rate)
+            # Load the engine
+            self.tts_engine.load()
 
             # Log model info
-            self.log("system", f"MOSS-TTS loaded on {self.device}")
-            self.log("system", f"Model dtype: {self.tts_model.dtype}, Attn: {attn_impl}")
+            self.log("system", f"{self.tts_engine_name} loaded on {self.device}")
+            if self.tts_engine_name == "Qwen3-TTS":
+                self.log("system", f"Speaker: {self.qwen3_speaker}")
 
     def transcribe(self, audio):
         import numpy as np
@@ -1199,7 +1214,6 @@ class SimplifiedVoiceChat:
             return f"Sorry, I couldn't connect to the language model: {e}"
 
     def synthesize_speech(self, text):
-        import torch
         import numpy as np
 
         self.load_tts()
@@ -1212,44 +1226,17 @@ class SimplifiedVoiceChat:
         # Detailed TTS timing
         t_gen_start = time.time()
 
-        self.log("system", f"[DEBUG] Starting TTS for: '{text[:50]}...'")
+        self.log("system", f"[DEBUG] Starting TTS ({self.tts_engine_name}) for: '{text[:50]}...'")
 
-        result = self.tts_inferencer.generate(
-            text=text,
-            reference_audio_path=voice_ref,
-            temperature=0.8,
-            top_p=0.6,
-            top_k=30,
-            repetition_penalty=1.1,
-            repetition_window=50,
-            device=self.device,
-        )
-
-        # Collect and decode chunks
-        audio_samples = []
-        chunk_count = 0
-        t_decode_total = 0
-
-        for generated_tokens in result:
-            t_chunk_start = time.time()
-            output = torch.tensor(generated_tokens).to(self.device)
-            decode_result = self.tts_codec.decode(output.permute(1, 0), chunk_duration=8)
-            wav = decode_result["audio"][0].cpu().detach()
-            if wav.ndim == 1:
-                wav = wav.unsqueeze(0)
-            audio_samples.append(wav)
-            chunk_count += 1
-            t_decode_total += time.time() - t_chunk_start
+        # Use the TTS engine abstraction
+        audio = self.tts_engine.synthesize(text, voice_path=voice_ref)
 
         t_gen_end = time.time()
         gen_time = t_gen_end - t_gen_start
 
-        self.log("system", f"[DEBUG] TTS detail: gen={gen_time:.2f}s, decode={t_decode_total:.2f}s, chunks={chunk_count}")
+        self.log("system", f"[DEBUG] TTS completed in {gen_time:.2f}s")
 
-        if audio_samples:
-            audio = torch.cat(audio_samples, dim=-1)
-            return audio.numpy().flatten()
-        return np.array([])
+        return audio if len(audio) > 0 else np.array([])
 
     def stream_chat_ollama(self, user_message):
         """Stream LLM response and yield text chunks at sentence boundaries"""
@@ -1436,12 +1423,13 @@ class SimplifiedVoiceChat:
 
         def audio_player():
             """Play audio chunks as they become available"""
+            sample_rate = self.tts_engine.get_sample_rate() if self.tts_engine else 24000
             while True:
                 audio_chunk = audio_queue.get()
                 if audio_chunk is None:
                     break
                 try:
-                    sd.play(audio_chunk, 24000)
+                    sd.play(audio_chunk, sample_rate)
                     sd.wait()
                 except Exception as e:
                     self.log("error", f"Playback error: {e}")
@@ -1548,7 +1536,8 @@ class SimplifiedVoiceChat:
 
             if len(audio_response) > 0:
                 t_play_start = time.time()
-                play_audio(audio_response, sample_rate=24000)
+                sample_rate = self.tts_engine.get_sample_rate() if self.tts_engine else 24000
+                play_audio(audio_response, sample_rate=sample_rate)
                 t_play_end = time.time()
                 play_time = t_play_end - t_play_start
                 self.log("system", f"[DEBUG] Playback: {play_time:.2f}s")
