@@ -10,6 +10,9 @@ if not exist "venv_voice_ai\Scripts\python.exe" (
     exit /b 1
 )
 
+REM Add venv Scripts to PATH (for SoX and other tools)
+set "PATH=%~dp0venv_voice_ai\Scripts;%PATH%"
+
 REM Add FFmpeg to PATH for voice cloning support (torchcodec needs FFmpeg DLLs)
 REM Try miniconda's FFmpeg first (has shared libraries)
 if exist "%USERPROFILE%\miniconda3\Library\bin\avcodec-58.dll" (
