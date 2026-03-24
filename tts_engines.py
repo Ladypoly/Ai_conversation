@@ -193,11 +193,11 @@ class Qwen3TTSEngine(TTSEngine):
     ]
 
     def __init__(self, device: str = "cuda", dtype: torch.dtype = torch.bfloat16,
-                 speaker: str = "serena", model_size: str = "1.7B"):
+                 speaker: str = "serena", model_size: str = "0.6B"):
         super().__init__(device, dtype)
         self.model = None
         self.speaker = speaker
-        self.model_size = model_size
+        self.model_size = model_size  # "0.6B" is faster, "1.7B" is higher quality
         self._sample_rate = 24000  # Qwen3-TTS outputs at 24kHz
 
     @property
@@ -232,6 +232,8 @@ class Qwen3TTSEngine(TTSEngine):
 
         # Select model based on size
         model_name = f"Qwen/Qwen3-TTS-12Hz-{self.model_size}-CustomVoice"
+        print(f"[DEBUG] Loading Qwen3-TTS model: {model_name}")
+        print(f"[DEBUG] Device: {self.device}, dtype: {self.dtype}, attn: {attn_impl}")
 
         self.model = Qwen3TTSModel.from_pretrained(
             model_name,
@@ -240,6 +242,7 @@ class Qwen3TTSEngine(TTSEngine):
             attn_implementation=attn_impl,
         )
 
+        print(f"[DEBUG] Qwen3-TTS model loaded successfully")
         self.loaded = True
 
     def synthesize(self, text: str, voice_path: Optional[str] = None) -> np.ndarray:
@@ -281,10 +284,13 @@ class Qwen3TTSEngine(TTSEngine):
         if isinstance(result, tuple):
             audio_list, returned_sample_rate = result
             self._sample_rate = returned_sample_rate  # Update sample rate from model
+            print(f"[DEBUG] Qwen3-TTS returned {len(audio_list)} audio chunks, sample_rate={returned_sample_rate}")
             # Concatenate all audio chunks
             if audio_list and len(audio_list) > 0:
                 audio = np.concatenate(audio_list) if len(audio_list) > 1 else audio_list[0]
+                print(f"[DEBUG] Audio shape: {audio.shape}, dtype: {audio.dtype}, min: {audio.min():.4f}, max: {audio.max():.4f}")
             else:
+                print("[DEBUG] No audio chunks returned!")
                 return np.array([])
         else:
             audio = result
@@ -297,6 +303,7 @@ class Qwen3TTSEngine(TTSEngine):
         if audio.ndim > 1:
             audio = audio.flatten()
 
+        print(f"[DEBUG] Final audio: {len(audio)} samples, {len(audio)/self._sample_rate:.2f}s duration")
         return audio
 
     def set_speaker(self, speaker: str) -> None:
