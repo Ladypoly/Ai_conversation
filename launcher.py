@@ -25,7 +25,7 @@ CONFIG_FILE = "user_config.json"
 
 # TTS Engine options
 TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS"]
-QWEN3_SPEAKERS = ["Chelsie", "Ethan", "Airi", "Zara", "Rafaela", "Sky", "Theo", "Nova", "Harper"]
+QWEN3_SPEAKERS = ["serena", "aiden", "dylan", "eric", "ono_anna", "ryan", "sohee", "uncle_fu", "vivian"]
 
 DEFAULT_PERSONAS = {
     "Helpful Assistant": "You are a helpful voice assistant. Keep your responses concise and conversational - aim for 1-3 sentences unless more detail is needed. Be friendly and natural.",
@@ -257,7 +257,7 @@ class VoiceChatApp:
 
         # Qwen3-TTS Speaker selector (only visible when Qwen3-TTS selected)
         self.qwen3_speaker_label = ttk.Label(row3, text="Speaker:")
-        self.qwen3_speaker_var = tk.StringVar(value=self.saved_config.get("qwen3_speaker", "Chelsie"))
+        self.qwen3_speaker_var = tk.StringVar(value=self.saved_config.get("qwen3_speaker", "serena"))
         self.qwen3_speaker_combo = ttk.Combobox(row3, textvariable=self.qwen3_speaker_var,
                                                  values=QWEN3_SPEAKERS, state="readonly", width=10)
 
@@ -589,7 +589,7 @@ class VoiceChatApp:
         self.output_queue.put(("system", "Chat stopped by user"))
         self.set_status("Stopped - Click Start to begin again", "gray")
 
-    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None, tts_engine="MOSS-TTS", qwen3_speaker="Chelsie"):
+    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None, tts_engine="MOSS-TTS", qwen3_speaker="serena"):
         """Run the voice chat loop in a background thread"""
         try:
             import torch
@@ -998,7 +998,7 @@ class VoiceChatApp:
 class SimplifiedVoiceChat:
     """Simplified voice chat that reports to the UI"""
 
-    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True, tts_engine="MOSS-TTS", qwen3_speaker="Chelsie"):
+    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True, tts_engine="MOSS-TTS", qwen3_speaker="serena"):
         import torch
         self.output_queue = output_queue
         self.system_prompt = system_prompt

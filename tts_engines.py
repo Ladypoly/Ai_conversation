@@ -181,19 +181,19 @@ class Qwen3TTSEngine(TTSEngine):
 
     # Available speakers for Qwen3-TTS CustomVoice model
     SPEAKERS = [
-        "Chelsie",
-        "Ethan",
-        "Airi",
-        "Zara",
-        "Rafaela",
-        "Sky",
-        "Theo",
-        "Nova",
-        "Harper"
+        "aiden",
+        "dylan",
+        "eric",
+        "ono_anna",
+        "ryan",
+        "serena",
+        "sohee",
+        "uncle_fu",
+        "vivian"
     ]
 
     def __init__(self, device: str = "cuda", dtype: torch.dtype = torch.bfloat16,
-                 speaker: str = "Chelsie", model_size: str = "1.7B"):
+                 speaker: str = "serena", model_size: str = "1.7B"):
         super().__init__(device, dtype)
         self.model = None
         self.speaker = speaker
