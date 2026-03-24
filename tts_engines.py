@@ -255,7 +255,7 @@ class Qwen3TTSEngine(TTSEngine):
                     transcript = f.read().strip()
 
             if transcript:
-                audio = self.model.generate_voice_clone(
+                result = self.model.generate_voice_clone(
                     text=text,
                     language="english",
                     reference_audio=voice_path,
@@ -263,18 +263,31 @@ class Qwen3TTSEngine(TTSEngine):
                 )
             else:
                 # Fallback to custom voice without cloning
-                audio = self.model.generate_custom_voice(
+                result = self.model.generate_custom_voice(
                     text=text,
                     language="english",
                     speaker=self.speaker
                 )
         else:
             # Use built-in speaker
-            audio = self.model.generate_custom_voice(
+            result = self.model.generate_custom_voice(
                 text=text,
                 language="english",
                 speaker=self.speaker
             )
+
+        # generate_custom_voice returns Tuple[List[np.ndarray], int]
+        # Unpack the tuple: (audio_list, sample_rate)
+        if isinstance(result, tuple):
+            audio_list, returned_sample_rate = result
+            self._sample_rate = returned_sample_rate  # Update sample rate from model
+            # Concatenate all audio chunks
+            if audio_list and len(audio_list) > 0:
+                audio = np.concatenate(audio_list) if len(audio_list) > 1 else audio_list[0]
+            else:
+                return np.array([])
+        else:
+            audio = result
 
         # Convert to numpy if needed
         if isinstance(audio, torch.Tensor):
