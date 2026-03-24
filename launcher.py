@@ -1424,13 +1424,17 @@ class SimplifiedVoiceChat:
         def audio_player():
             """Play audio chunks as they become available"""
             sample_rate = self.tts_engine.get_sample_rate() if self.tts_engine else 24000
+            self.log("system", f"[DEBUG] Audio player started, sample_rate={sample_rate}")
             while True:
                 audio_chunk = audio_queue.get()
                 if audio_chunk is None:
+                    self.log("system", "[DEBUG] Audio player received stop signal")
                     break
                 try:
+                    self.log("system", f"[DEBUG] Playing audio: {len(audio_chunk)} samples, {len(audio_chunk)/sample_rate:.2f}s")
                     sd.play(audio_chunk, sample_rate)
                     sd.wait()
+                    self.log("system", "[DEBUG] Audio playback complete")
                 except Exception as e:
                     self.log("error", f"Playback error: {e}")
             playback_done.set()

@@ -303,8 +303,14 @@ class Qwen3TTSEngine(TTSEngine):
         if audio.ndim > 1:
             audio = audio.flatten()
 
+        # Normalize audio to [-1, 1] range for proper playback
+        max_val = np.abs(audio).max()
+        if max_val > 0:
+            audio = audio / max_val * 0.95  # Normalize to 95% to avoid clipping
+
         print(f"[DEBUG] Final audio: {len(audio)} samples, {len(audio)/self._sample_rate:.2f}s duration")
-        return audio
+        print(f"[DEBUG] Normalized audio range: [{audio.min():.4f}, {audio.max():.4f}]")
+        return audio.astype(np.float32)
 
     def set_speaker(self, speaker: str) -> None:
         """Change the speaker voice"""
