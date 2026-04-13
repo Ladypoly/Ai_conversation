@@ -123,6 +123,30 @@ class AudioRecorder:
             return np.concatenate(audio_chunks, axis=0).flatten()
         return np.array([])
 
+    def record_ptt_toggle(self) -> np.ndarray:
+        """Record audio until self.recording is set to False (toggle mode for UI buttons)"""
+        self.start_stream()
+        self.recording = True
+        audio_chunks = []
+
+        while self.recording:
+            try:
+                chunk = self.audio_queue.get(timeout=0.1)
+                audio_chunks.append(chunk)
+            except queue.Empty:
+                continue
+
+        # Clear queue
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if audio_chunks:
+            return np.concatenate(audio_chunks, axis=0).flatten()
+        return np.array([])
+
     def record_vad(self) -> np.ndarray:
         """Record audio using voice activity detection"""
         if self.vad_model is None:

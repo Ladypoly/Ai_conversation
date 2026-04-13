@@ -455,7 +455,8 @@ class OmniVoiceEngine(TTSEngine):
 
         # Block torchcodec by injecting dummy modules into sys.modules BEFORE torchaudio imports it
         if 'torchcodec' not in sys.modules or not hasattr(sys.modules.get('torchcodec', None), '_is_real'):
-            # Create dummy AudioDecoder class that torchaudio expects to import
+            import importlib.machinery
+
             class _DummyAudioDecoder:
                 def __init__(self, *args, **kwargs):
                     raise RuntimeError("torchcodec disabled - using soundfile backend instead")
@@ -464,11 +465,21 @@ class OmniVoiceEngine(TTSEngine):
                 pass
 
             dummy = types.ModuleType('torchcodec')
+            # Set __spec__ so importlib.util.find_spec doesn't raise ValueError
+            dummy.__spec__ = importlib.machinery.ModuleSpec('torchcodec', None)
+            dummy.__path__ = []
+            dummy.__file__ = None
+            dummy.__version__ = "0.0.0"
+
             dummy.decoders = types.ModuleType('torchcodec.decoders')
+            dummy.decoders.__spec__ = importlib.machinery.ModuleSpec('torchcodec.decoders', None)
             dummy.decoders.AudioDecoder = _DummyAudioDecoder
+
             dummy._core = types.ModuleType('torchcodec._core')
+            dummy._core.__spec__ = importlib.machinery.ModuleSpec('torchcodec._core', None)
             dummy._core.AudioStreamMetadata = _DummyMetadata
             dummy._core.VideoStreamMetadata = _DummyMetadata
+
             sys.modules['torchcodec'] = dummy
             sys.modules['torchcodec.decoders'] = dummy.decoders
             sys.modules['torchcodec._core'] = dummy._core

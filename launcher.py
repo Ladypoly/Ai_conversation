@@ -10,8 +10,9 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 import os
 os.environ["PYTHONWARNINGS"] = "ignore"
 
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
+from tkinter import messagebox, filedialog
 import threading
 import queue
 import sys
@@ -22,6 +23,16 @@ import re
 import subprocess
 
 CONFIG_FILE = "user_config.json"
+
+
+def create_section(parent, title):
+    """Create a labeled section frame (replaces ttk.LabelFrame for CTk)"""
+    frame = ctk.CTkFrame(parent)
+    ctk.CTkLabel(frame, text=title, font=ctk.CTkFont(size=13, weight="bold")).pack(
+        anchor="w", padx=12, pady=(8, 2))
+    inner = ctk.CTkFrame(frame, fg_color="transparent")
+    inner.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+    return frame, inner
 
 # TTS Engine options
 TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS", "OmniVoice"]
@@ -40,26 +51,31 @@ DEFAULT_PERSONAS = {
     "Custom": ""
 }
 
-# Voice options - auto-discovered from MOSS-TTS audio folder
+# Voice options - auto-discovered from MOSS-TTS audio folder + VoiceSamples
 VOICE_AUDIO_DIR = "MOSS-TTS/moss_tts_realtime/audio"
+VOICE_SAMPLES_DIR = "VoiceSamples"
+OUTPUT_DIR = "Output"
 
 def get_voice_options():
-    """Scan audio folder and build voice options dict"""
+    """Scan audio folders and build voice options dict"""
     options = {}
+    audio_extensions = ('.wav', '.mp3', '.flac', '.ogg', '.m4a')
 
-    # Scan for audio files
+    # Scan MOSS-TTS reference audio
     if os.path.exists(VOICE_AUDIO_DIR):
-        audio_files = []
-        for f in os.listdir(VOICE_AUDIO_DIR):
-            if f.lower().endswith(('.wav', '.mp3', '.flac', '.ogg')):
-                audio_files.append(f)
+        for f in sorted(os.listdir(VOICE_AUDIO_DIR)):
+            if f.lower().endswith(audio_extensions):
+                name = os.path.splitext(f)[0]
+                display_name = name.replace('_', ' ').title()
+                options[display_name] = os.path.join(VOICE_AUDIO_DIR, f)
 
-        # Sort and add to options
-        for i, f in enumerate(sorted(audio_files)):
-            name = os.path.splitext(f)[0]  # Remove extension
-            # Make friendly name
-            display_name = name.replace('_', ' ').title()
-            options[display_name] = os.path.join(VOICE_AUDIO_DIR, f)
+    # Scan VoiceSamples folder
+    if os.path.exists(VOICE_SAMPLES_DIR):
+        for f in sorted(os.listdir(VOICE_SAMPLES_DIR)):
+            if f.lower().endswith(audio_extensions):
+                name = os.path.splitext(f)[0]
+                display_name = f"Sample: {name}"
+                options[display_name] = os.path.join(VOICE_SAMPLES_DIR, f)
 
     # Add special options at the end
     options["Random (No Clone)"] = None
@@ -131,6 +147,16 @@ class VoiceChatApp:
         self.training_pairs = []
         self.trained_voice_paths = {}
 
+        # Studio state
+        self.studio_audio_data = None
+        self.studio_sample_rate = 24000
+        self.studio_generating = False
+        self.studio_recording = False
+        self.studio_recorded_audio = None
+        self.studio_output_queue = queue.Queue()
+        self.studio_recorder = None
+        self.studio_tts_engine_instance = None
+
         # Load saved config
         self.load_config()
 
@@ -168,133 +194,142 @@ class VoiceChatApp:
             "qwen3_speaker": self.qwen3_speaker_var.get(),
             "omni_language": self.omni_lang_var.get(),
             "omni_voice_design": self.omni_design_var.get(),
-            "omni_speed": self.omni_speed_var.get()
+            "omni_speed": self.omni_speed_var.get(),
+            "studio_tts_engine": self.studio_engine_var.get(),
+            "studio_voice": self.studio_voice_var.get(),
+            "studio_qwen3_speaker": self.studio_qwen3_var.get(),
+            "studio_omni_language": self.studio_omni_lang_var.get(),
+            "studio_omni_design": self.studio_omni_design_var.get(),
+            "studio_omni_speed": self.studio_omni_speed_var.get()
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
 
     def create_widgets(self):
         # Main container
-        main_frame = ttk.Frame(self.root, padding="5")
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame = ctk.CTkFrame(self.root)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Create notebook (tabbed interface)
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        # Create tabview (replaces ttk.Notebook)
+        self.tabview = ctk.CTkTabview(main_frame)
+        self.tabview.pack(fill=tk.BOTH, expand=True)
 
-        # Tab 1: Chat
-        self.chat_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.chat_frame, text="Chat")
+        # Add tabs
+        self.tabview.add("Chat")
+        self.tabview.add("TTS Studio")
+        self.tabview.add("Train Voice")
 
-        # Tab 2: Train Voice
-        self.train_frame = ttk.Frame(self.notebook)
-        self.notebook.add(self.train_frame, text="Train Voice")
+        # Get tab frames
+        self.chat_frame = self.tabview.tab("Chat")
+        self.studio_frame = self.tabview.tab("TTS Studio")
+        self.train_frame = self.tabview.tab("Train Voice")
 
         # Build widgets for each tab
         self._create_chat_widgets()
+        self._create_studio_widgets()
         self._create_train_widgets()
 
     def _create_chat_widgets(self):
         """Create widgets for the Chat tab"""
         # Top frame - Settings
-        self.settings_frame = ttk.LabelFrame(self.chat_frame, text="Settings", padding="5")
-        self.settings_frame.pack(fill=tk.X, pady=2)
+        self.settings_frame_outer, self.settings_frame = create_section(self.chat_frame, "Settings")
+        self.settings_frame_outer.pack(fill=tk.X, pady=2)
 
         # Row 1 - Persona and Models
-        row1 = ttk.Frame(self.settings_frame)
+        row1 = ctk.CTkFrame(self.settings_frame)
         row1.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row1, text="Persona:").pack(side=tk.LEFT)
+        ctk.CTkLabel(row1, text="Persona:").pack(side=tk.LEFT)
         self.persona_var = tk.StringVar(value=self.saved_config.get("persona", "Helpful Assistant"))
-        persona_combo = ttk.Combobox(row1, textvariable=self.persona_var,
-                                      values=list(DEFAULT_PERSONAS.keys()), state="readonly", width=18)
+        persona_combo = ctk.CTkComboBox(row1, variable=self.persona_var,
+                                      values=list(DEFAULT_PERSONAS.keys()), width=150,
+                                      command=self.on_persona_change)
         persona_combo.pack(side=tk.LEFT, padx=5)
-        persona_combo.bind("<<ComboboxSelected>>", self.on_persona_change)
 
-        ttk.Label(row1, text="LLM:").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(row1, text="LLM:").pack(side=tk.LEFT, padx=(10, 0))
         self.ollama_var = tk.StringVar(value=self.saved_config.get("ollama_model", "qwen3.5:4b"))
-        self.ollama_combo = ttk.Combobox(row1, textvariable=self.ollama_var,
-                                          values=get_ollama_models(), width=18)
+        self.ollama_combo = ctk.CTkComboBox(row1, variable=self.ollama_var,
+                                          values=get_ollama_models(), width=160)
         self.ollama_combo.pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(row1, text="Whisper:").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(row1, text="Whisper:").pack(side=tk.LEFT, padx=(10, 0))
         self.whisper_var = tk.StringVar(value=self.saved_config.get("whisper_model", "large-v3"))
-        whisper_combo = ttk.Combobox(row1, textvariable=self.whisper_var,
+        whisper_combo = ctk.CTkComboBox(row1, variable=self.whisper_var,
                                       values=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-                                      state="readonly", width=10)
+                                      width=120)
         whisper_combo.pack(side=tk.LEFT, padx=5)
 
         # Row 2 - Voice and Mode
-        row2 = ttk.Frame(self.settings_frame)
+        row2 = ctk.CTkFrame(self.settings_frame)
         row2.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row2, text="Voice:").pack(side=tk.LEFT)
+        ctk.CTkLabel(row2, text="Voice:").pack(side=tk.LEFT)
         # Default to first available voice (or first key in VOICE_OPTIONS)
         default_voice = list(VOICE_OPTIONS.keys())[0] if VOICE_OPTIONS else "Random (No Clone)"
         self.voice_var = tk.StringVar(value=self.saved_config.get("voice", default_voice))
-        self.voice_combo = ttk.Combobox(row2, textvariable=self.voice_var,
-                                    values=list(VOICE_OPTIONS.keys()), state="readonly", width=20)
+        self.voice_combo = ctk.CTkComboBox(row2, variable=self.voice_var,
+                                    values=list(VOICE_OPTIONS.keys()), width=200)
         self.voice_combo.pack(side=tk.LEFT, padx=5)
-        self.voice_combo.bind("<<ComboboxSelected>>", self.on_voice_change)
+        self.voice_combo.configure(command=self.on_voice_change)
 
-        ttk.Label(row2, text="Mode:").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(row2, text="Mode:").pack(side=tk.LEFT, padx=(10, 0))
         self.mode_var = tk.StringVar(value=self.saved_config.get("input_mode", "ptt"))
-        ttk.Radiobutton(row2, text="Push-to-Talk", variable=self.mode_var,
+        ctk.CTkRadioButton(row2, text="Push-to-Talk", variable=self.mode_var,
                         value="ptt").pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(row2, text="VAD", variable=self.mode_var,
+        ctk.CTkRadioButton(row2, text="VAD", variable=self.mode_var,
                         value="vad").pack(side=tk.LEFT)
 
         # Fast mode checkbox
         self.fast_mode_var = tk.BooleanVar(value=self.saved_config.get("fast_mode", True))
-        ttk.Checkbutton(row2, text="Fast Mode", variable=self.fast_mode_var).pack(side=tk.LEFT, padx=(20, 0))
+        ctk.CTkCheckBox(row2, text="Fast Mode", variable=self.fast_mode_var).pack(side=tk.LEFT, padx=(20, 0))
 
         # Streaming mode checkbox (streams LLM->TTS for faster first response)
         self.streaming_mode_var = tk.BooleanVar(value=self.saved_config.get("streaming_mode", True))
-        ttk.Checkbutton(row2, text="Streaming", variable=self.streaming_mode_var).pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkCheckBox(row2, text="Streaming", variable=self.streaming_mode_var).pack(side=tk.LEFT, padx=(10, 0))
 
         # Row 3 - TTS Engine selection
-        row3 = ttk.Frame(self.settings_frame)
+        row3 = ctk.CTkFrame(self.settings_frame)
         row3.pack(fill=tk.X, pady=2)
 
-        ttk.Label(row3, text="TTS Engine:").pack(side=tk.LEFT)
+        ctk.CTkLabel(row3, text="TTS Engine:").pack(side=tk.LEFT)
         self.tts_engine_var = tk.StringVar(value=self.saved_config.get("tts_engine", "MOSS-TTS"))
-        self.tts_engine_combo = ttk.Combobox(row3, textvariable=self.tts_engine_var,
-                                              values=TTS_ENGINE_OPTIONS, state="readonly", width=12)
+        self.tts_engine_combo = ctk.CTkComboBox(row3, variable=self.tts_engine_var,
+                                              values=TTS_ENGINE_OPTIONS, width=140)
         self.tts_engine_combo.pack(side=tk.LEFT, padx=5)
-        self.tts_engine_combo.bind("<<ComboboxSelected>>", self.on_tts_engine_change)
+        self.tts_engine_combo.configure(command=self.on_tts_engine_change)
 
         # Qwen3-TTS Speaker selector (only visible when Qwen3-TTS selected)
-        self.qwen3_speaker_label = ttk.Label(row3, text="Speaker:")
+        self.qwen3_speaker_label = ctk.CTkLabel(row3, text="Speaker:")
         self.qwen3_speaker_var = tk.StringVar(value=self.saved_config.get("qwen3_speaker", "serena"))
-        self.qwen3_speaker_combo = ttk.Combobox(row3, textvariable=self.qwen3_speaker_var,
-                                                 values=QWEN3_SPEAKERS, state="readonly", width=10)
+        self.qwen3_speaker_combo = ctk.CTkComboBox(row3, variable=self.qwen3_speaker_var,
+                                                 values=QWEN3_SPEAKERS, width=120)
 
         # OmniVoice settings row (only visible when OmniVoice selected)
-        self.omni_settings_row = ttk.Frame(self.settings_frame)
+        self.omni_settings_row = ctk.CTkFrame(self.settings_frame)
 
-        ttk.Label(self.omni_settings_row, text="Language:").pack(side=tk.LEFT)
+        ctk.CTkLabel(self.omni_settings_row, text="Language:").pack(side=tk.LEFT)
         self.omni_lang_var = tk.StringVar(value=self.saved_config.get("omni_language", "en"))
-        ttk.Combobox(self.omni_settings_row, textvariable=self.omni_lang_var,
-                     values=OMNIVOICE_LANGUAGES, state="readonly", width=5).pack(side=tk.LEFT, padx=5)
+        ctk.CTkComboBox(self.omni_settings_row, variable=self.omni_lang_var,
+                     values=OMNIVOICE_LANGUAGES, width=80).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(self.omni_settings_row, text="Voice Design:").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(self.omni_settings_row, text="Voice Design:").pack(side=tk.LEFT, padx=(10, 0))
         self.omni_design_var = tk.StringVar(value=self.saved_config.get("omni_voice_design", ""))
-        ttk.Entry(self.omni_settings_row, textvariable=self.omni_design_var, width=30).pack(side=tk.LEFT, padx=5)
+        ctk.CTkEntry(self.omni_settings_row, textvariable=self.omni_design_var, width=200, state="disabled").pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(self.omni_settings_row, text="Speed:").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(self.omni_settings_row, text="Speed:").pack(side=tk.LEFT, padx=(10, 0))
         self.omni_speed_var = tk.DoubleVar(value=float(self.saved_config.get("omni_speed", 1.0)))
-        ttk.Spinbox(self.omni_settings_row, from_=0.5, to=2.0, increment=0.1,
+        tk.Spinbox(self.omni_settings_row, from_=0.5, to=2.0, increment=0.1,
                     textvariable=self.omni_speed_var, width=5).pack(side=tk.LEFT, padx=2)
 
         # Show/hide engine-specific settings based on current engine selection
         self.on_tts_engine_change()
 
         # System prompt
-        prompt_frame = ttk.LabelFrame(self.settings_frame, text="System Prompt", padding="2")
-        prompt_frame.pack(fill=tk.X, pady=2)
+        prompt_frame_outer, prompt_frame = create_section(self.settings_frame, "System Prompt")
+        prompt_frame_outer.pack(fill=tk.X, pady=2)
 
-        self.prompt_text = scrolledtext.ScrolledText(prompt_frame, wrap=tk.WORD, height=3,
-                                                      font=('Consolas', 9))
+        self.prompt_text = ctk.CTkTextbox(prompt_frame, wrap="word", height=80,
+                                                      font=('Consolas', 11))
         self.prompt_text.pack(fill=tk.X)
 
         saved_prompt = self.saved_config.get("system_prompt", "")
@@ -304,34 +339,37 @@ class VoiceChatApp:
             self.prompt_text.insert("1.0", DEFAULT_PERSONAS[self.persona_var.get()])
 
         # Voice Level Indicator
-        level_frame = ttk.Frame(self.chat_frame)
+        level_frame = ctk.CTkFrame(self.chat_frame)
         level_frame.pack(fill=tk.X, pady=2)
 
-        ttk.Label(level_frame, text="Mic Level:").pack(side=tk.LEFT)
-        self.level_canvas = tk.Canvas(level_frame, width=300, height=20, bg="#333333", highlightthickness=1)
+        ctk.CTkLabel(level_frame, text="Mic Level:").pack(side=tk.LEFT)
+        self.level_canvas = tk.Canvas(level_frame, width=300, height=20, bg="#2b2b2b", highlightthickness=1)
         self.level_canvas.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         self.level_bar = self.level_canvas.create_rectangle(0, 0, 0, 20, fill="#4CAF50", outline="")
 
         # Conversation frame
-        conv_frame = ttk.LabelFrame(self.chat_frame, text="Conversation", padding="5")
-        conv_frame.pack(fill=tk.BOTH, expand=True, pady=2)
+        conv_frame_outer, conv_frame = create_section(self.chat_frame, "Conversation")
+        conv_frame_outer.pack(fill=tk.BOTH, expand=True, pady=2)
 
-        self.conv_text = scrolledtext.ScrolledText(conv_frame, wrap=tk.WORD, state=tk.DISABLED,
-                                                    font=('Consolas', 10))
+        # Use tk.Text for colored tags support (CTkTextbox doesn't support tags)
+        self.conv_text = tk.Text(conv_frame, wrap="word", state="disabled",
+                                 font=('Consolas', 10), bg="#2b2b2b", fg="#dcdcdc",
+                                 insertbackground="#dcdcdc", selectbackground="#4a6984",
+                                 relief="flat", borderwidth=0, padx=8, pady=8)
         self.conv_text.pack(fill=tk.BOTH, expand=True)
 
         # Configure tags for colored text
-        self.conv_text.tag_configure("user", foreground="#2196F3", font=('Consolas', 10, 'bold'))
-        self.conv_text.tag_configure("assistant", foreground="#4CAF50", font=('Consolas', 10, 'bold'))
+        self.conv_text.tag_configure("user", foreground="#64B5F6", font=('Consolas', 10, 'bold'))
+        self.conv_text.tag_configure("assistant", foreground="#81C784", font=('Consolas', 10, 'bold'))
         self.conv_text.tag_configure("system", foreground="#9E9E9E", font=('Consolas', 9, 'italic'))
-        self.conv_text.tag_configure("error", foreground="#F44336")
+        self.conv_text.tag_configure("error", foreground="#EF5350")
 
         # Bottom frame - Status and controls
-        bottom_frame = ttk.Frame(self.chat_frame)
+        bottom_frame = ctk.CTkFrame(self.chat_frame)
         bottom_frame.pack(fill=tk.X, pady=5)
 
         # Status indicator
-        status_frame = ttk.Frame(bottom_frame)
+        status_frame = ctk.CTkFrame(bottom_frame)
         status_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.status_indicator = tk.Canvas(status_frame, width=16, height=16)
@@ -339,176 +377,810 @@ class VoiceChatApp:
         self.status_circle = self.status_indicator.create_oval(2, 2, 14, 14, fill="gray")
 
         self.status_var = tk.StringVar(value="Ready - Configure settings and click Start")
-        status_label = ttk.Label(status_frame, textvariable=self.status_var, font=('Helvetica', 9))
+        status_label = ctk.CTkLabel(status_frame, textvariable=self.status_var, font=('Helvetica', 9))
         status_label.pack(side=tk.LEFT)
 
         # Buttons
-        self.stop_btn = ttk.Button(bottom_frame, text="Stop", command=self.stop_chat, state=tk.DISABLED)
+        self.stop_btn = ctk.CTkButton(bottom_frame, text="Stop", command=self.stop_chat, state="disabled")
         self.stop_btn.pack(side=tk.RIGHT, padx=5)
 
-        self.start_btn = ttk.Button(bottom_frame, text="Start", command=self.start_chat)
+        self.start_btn = ctk.CTkButton(bottom_frame, text="Start", command=self.start_chat)
         self.start_btn.pack(side=tk.RIGHT, padx=5)
 
-        self.clear_btn = ttk.Button(bottom_frame, text="Clear Log", command=self.clear_log)
+        self.clear_btn = ctk.CTkButton(bottom_frame, text="Clear Log", command=self.clear_log)
         self.clear_btn.pack(side=tk.RIGHT, padx=5)
 
-        refresh_btn = ttk.Button(bottom_frame, text="Refresh LLMs", command=self.refresh_llms)
+        refresh_btn = ctk.CTkButton(bottom_frame, text="Refresh LLMs", command=self.refresh_llms)
         refresh_btn.pack(side=tk.RIGHT, padx=5)
 
         # Load trained voices into dropdown
         self.refresh_trained_voices()
 
+    def _create_studio_widgets(self):
+        """Create widgets for the TTS Studio tab"""
+        container = ctk.CTkFrame(self.studio_frame, fg_color="transparent")
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # === Input Section ===
+        input_frame_outer, input_frame = create_section(container, "Input")
+        input_frame_outer.pack(fill=tk.X, pady=3)
+
+        # Mode selector
+        mode_row = ctk.CTkFrame(input_frame)
+        mode_row.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(mode_row, text="Mode:").pack(side=tk.LEFT)
+        self.studio_input_mode = tk.StringVar(value="text")
+        ctk.CTkRadioButton(mode_row, text="Text", variable=self.studio_input_mode,
+                        value="text", command=self.on_studio_input_mode_change).pack(side=tk.LEFT, padx=5)
+        ctk.CTkRadioButton(mode_row, text="Microphone", variable=self.studio_input_mode,
+                        value="mic", command=self.on_studio_input_mode_change).pack(side=tk.LEFT, padx=5)
+        ctk.CTkRadioButton(mode_row, text="Audio File", variable=self.studio_input_mode,
+                        value="file", command=self.on_studio_input_mode_change).pack(side=tk.LEFT, padx=5)
+
+        # Text input frame
+        self.studio_text_frame = ctk.CTkFrame(input_frame)
+        self.studio_text_frame.pack(fill=tk.BOTH, expand=True, pady=2)
+        self.studio_text_input = ctk.CTkTextbox(self.studio_text_frame, wrap="word", height=120,
+                                                            font=('Consolas', 11))
+        self.studio_text_input.pack(fill=tk.BOTH, expand=True)
+        self.studio_text_input.insert("1.0", "Hello there! This is a quick voice test. [laughter] Pretty cool, right? Let me know what you think about the quality of this voice.")
+
+        # Mic input frame
+        self.studio_mic_frame = ctk.CTkFrame(input_frame)
+        mic_controls = ctk.CTkFrame(self.studio_mic_frame)
+        mic_controls.pack(fill=tk.X, pady=2)
+        self.studio_record_btn = ctk.CTkButton(mic_controls, text="Record", command=self.studio_toggle_record)
+        self.studio_record_btn.pack(side=tk.LEFT, padx=5)
+        self.studio_rec_duration_var = tk.StringVar(value="Duration: --")
+        ctk.CTkLabel(mic_controls, textvariable=self.studio_rec_duration_var).pack(side=tk.LEFT, padx=10)
+        ctk.CTkLabel(mic_controls, text="Mic Level:").pack(side=tk.LEFT, padx=(10, 0))
+        self.studio_level_canvas = tk.Canvas(mic_controls, width=200, height=16, bg="#2b2b2b", highlightthickness=1)
+        self.studio_level_canvas.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        self.studio_level_bar = self.studio_level_canvas.create_rectangle(0, 0, 0, 16, fill="#4CAF50", outline="")
+        self.studio_transcribed_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.studio_mic_frame, textvariable=self.studio_transcribed_var,
+                  font=('Consolas', 9, 'italic')).pack(anchor=tk.W, pady=2)
+
+        # File input frame
+        self.studio_file_frame = ctk.CTkFrame(input_frame)
+        file_row = ctk.CTkFrame(self.studio_file_frame)
+        file_row.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(file_row, text="Audio File:").pack(side=tk.LEFT)
+        self.studio_file_var = tk.StringVar()
+        ctk.CTkEntry(file_row, textvariable=self.studio_file_var, width=50).pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ctk.CTkButton(file_row, text="Browse...", command=self.studio_browse_file).pack(side=tk.LEFT)
+        self.studio_file_info_var = tk.StringVar(value="")
+        ctk.CTkLabel(self.studio_file_frame, textvariable=self.studio_file_info_var,
+                  font=('Helvetica', 9, 'italic')).pack(anchor=tk.W, pady=2)
+
+        # === TTS Settings Section ===
+        settings_frame_outer, settings_frame = create_section(container, "TTS Settings")
+        settings_frame_outer.pack(fill=tk.X, pady=3)
+
+        settings_row1 = ctk.CTkFrame(settings_frame)
+        settings_row1.pack(fill=tk.X, pady=2)
+
+        ctk.CTkLabel(settings_row1, text="Engine:").pack(side=tk.LEFT)
+        self.studio_engine_var = tk.StringVar(value=self.saved_config.get("studio_tts_engine", "OmniVoice"))
+        self.studio_engine_combo = ctk.CTkComboBox(settings_row1, variable=self.studio_engine_var,
+                                                 values=TTS_ENGINE_OPTIONS, width=140)
+        self.studio_engine_combo.pack(side=tk.LEFT, padx=5)
+        self.studio_engine_combo.configure(command=self.on_studio_engine_change)
+
+        ctk.CTkLabel(settings_row1, text="Voice:").pack(side=tk.LEFT, padx=(10, 0))
+        default_voice = list(VOICE_OPTIONS.keys())[0] if VOICE_OPTIONS else "Random (No Clone)"
+        self.studio_voice_var = tk.StringVar(value=self.saved_config.get("studio_voice", default_voice))
+        self.studio_voice_combo = ctk.CTkComboBox(settings_row1, variable=self.studio_voice_var,
+                                                values=list(VOICE_OPTIONS.keys()), width=200)
+        self.studio_voice_combo.pack(side=tk.LEFT, padx=5)
+
+        # Qwen3 speaker (conditional)
+        self.studio_qwen3_label = ctk.CTkLabel(settings_row1, text="Speaker:")
+        self.studio_qwen3_var = tk.StringVar(value=self.saved_config.get("studio_qwen3_speaker", "serena"))
+        self.studio_qwen3_combo = ctk.CTkComboBox(settings_row1, variable=self.studio_qwen3_var,
+                                                values=QWEN3_SPEAKERS, width=120)
+
+        # OmniVoice settings (conditional)
+        self.studio_omni_row = ctk.CTkFrame(settings_frame)
+        ctk.CTkLabel(self.studio_omni_row, text="Language:").pack(side=tk.LEFT)
+        self.studio_omni_lang_var = tk.StringVar(value=self.saved_config.get("studio_omni_language", "en"))
+        ctk.CTkComboBox(self.studio_omni_row, variable=self.studio_omni_lang_var,
+                     values=OMNIVOICE_LANGUAGES, width=80).pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.studio_omni_row, text="Voice Design:").pack(side=tk.LEFT, padx=(10, 0))
+        self.studio_omni_design_var = tk.StringVar(value=self.saved_config.get("studio_omni_design", ""))
+        ctk.CTkEntry(self.studio_omni_row, textvariable=self.studio_omni_design_var, width=200, state="disabled").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(self.studio_omni_row, text="Speed:").pack(side=tk.LEFT, padx=(10, 0))
+        self.studio_omni_speed_var = tk.DoubleVar(value=float(self.saved_config.get("studio_omni_speed", 1.0)))
+        tk.Spinbox(self.studio_omni_row, from_=0.5, to=2.0, increment=0.1,
+                    textvariable=self.studio_omni_speed_var, width=5).pack(side=tk.LEFT, padx=2)
+
+        # Chunk size row
+        chunk_row = ctk.CTkFrame(settings_frame)
+        chunk_row.pack(fill=tk.X, pady=2)
+        ctk.CTkLabel(chunk_row, text="Chunk by:").pack(side=tk.LEFT)
+        self.studio_chunk_mode = tk.StringVar(value="sentence")
+        ctk.CTkRadioButton(chunk_row, text="Sentences", variable=self.studio_chunk_mode,
+                          value="sentence").pack(side=tk.LEFT, padx=5)
+        ctk.CTkRadioButton(chunk_row, text="Max chars:", variable=self.studio_chunk_mode,
+                          value="chars").pack(side=tk.LEFT, padx=5)
+        self.studio_chunk_size_var = tk.IntVar(value=300)
+        self.studio_chunk_size_spin = tk.Spinbox(chunk_row, from_=50, to=2000, increment=50,
+                    textvariable=self.studio_chunk_size_var, width=6,
+                    bg="#343638", fg="#dcdcdc", buttonbackground="#4a4a4a", relief="flat")
+        self.studio_chunk_size_spin.pack(side=tk.LEFT, padx=3)
+
+        self.on_studio_engine_change()
+
+        # === Output Section ===
+        output_frame_outer, output_frame = create_section(container, "Output")
+        output_frame_outer.pack(fill=tk.BOTH, expand=True, pady=3)
+
+        # Generate button + progress
+        gen_row = ctk.CTkFrame(output_frame)
+        gen_row.pack(fill=tk.X, pady=3)
+        self.studio_generate_btn = ctk.CTkButton(gen_row, text="Generate", command=self.studio_generate)
+        self.studio_generate_btn.pack(side=tk.LEFT, padx=5)
+        self.studio_progress = ctk.CTkProgressBar(gen_row, mode="indeterminate")
+        self.studio_progress.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10)
+        self.studio_progress.set(0)
+
+        # Audio info
+        info_row = ctk.CTkFrame(output_frame)
+        info_row.pack(fill=tk.X, pady=2)
+        self.studio_duration_var = tk.StringVar(value="Duration: --")
+        ctk.CTkLabel(info_row, textvariable=self.studio_duration_var, font=('Consolas', 9)).pack(side=tk.LEFT, padx=10)
+
+        # Playback + save buttons
+        playback_row = ctk.CTkFrame(output_frame)
+        playback_row.pack(fill=tk.X, pady=3)
+        self.studio_play_btn = ctk.CTkButton(playback_row, text="Play", command=self.studio_play, state="disabled")
+        self.studio_play_btn.pack(side=tk.LEFT, padx=5)
+
+        # Log output
+        self.studio_log = tk.Text(output_frame, wrap="word", height=8,
+                                   font=('Consolas', 9), state="disabled",
+                                   bg="#2b2b2b", fg="#dcdcdc", relief="flat", borderwidth=0, padx=8, pady=8)
+        self.studio_log.pack(fill=tk.BOTH, expand=True, pady=3)
+
+        # Status
+        self.studio_status_var = tk.StringVar(value="Ready")
+        ctk.CTkLabel(output_frame, textvariable=self.studio_status_var, font=('Helvetica', 9, 'bold')).pack(anchor=tk.W)
+
+    # ============== Studio Methods ==============
+
+    def on_studio_input_mode_change(self):
+        mode = self.studio_input_mode.get()
+        self.studio_text_frame.pack_forget()
+        self.studio_mic_frame.pack_forget()
+        self.studio_file_frame.pack_forget()
+        if mode == "text":
+            self.studio_text_frame.pack(fill=tk.BOTH, expand=True, pady=2)
+        elif mode == "mic":
+            self.studio_mic_frame.pack(fill=tk.X, pady=2)
+        elif mode == "file":
+            self.studio_file_frame.pack(fill=tk.X, pady=2)
+
+    def on_studio_engine_change(self, event=None):
+        engine = self.studio_engine_var.get()
+        # Qwen3 speaker
+        if engine == "Qwen3-TTS":
+            self.studio_qwen3_label.pack(side=tk.LEFT, padx=(15, 0))
+            self.studio_qwen3_combo.pack(side=tk.LEFT, padx=5)
+        else:
+            self.studio_qwen3_label.pack_forget()
+            self.studio_qwen3_combo.pack_forget()
+        # OmniVoice row
+        if engine == "OmniVoice":
+            self.studio_omni_row.pack(fill=tk.X, pady=2)
+        else:
+            self.studio_omni_row.pack_forget()
+
+    def studio_browse_file(self):
+        filepath = filedialog.askopenfilename(
+            title="Select audio file",
+            filetypes=[("Audio Files", "*.wav *.mp3 *.flac *.ogg *.m4a"), ("All Files", "*.*")]
+        )
+        if filepath:
+            self.studio_file_var.set(filepath)
+            try:
+                import soundfile as sf
+                info = sf.info(filepath)
+                self.studio_file_info_var.set(f"{info.duration:.1f}s, {info.samplerate}Hz, {info.channels}ch")
+            except Exception:
+                self.studio_file_info_var.set(os.path.basename(filepath))
+
+    def studio_toggle_record(self):
+        if self.studio_recording:
+            self.studio_stop_recording()
+        else:
+            self.studio_start_recording()
+
+    def studio_start_recording(self):
+        from audio_utils import AudioRecorder
+        self.studio_recording = True
+        self.studio_record_btn.configure(text="Stop Recording")
+        self.studio_recorded_audio = None
+        self.studio_rec_duration_var.set("Recording...")
+        self.studio_transcribed_var.set("")
+
+        if self.studio_recorder is None:
+            self.studio_recorder = AudioRecorder()
+        self.studio_recorder.level_callback = self.studio_on_level
+
+        # Record in background thread
+        def record_thread():
+            audio = self.studio_recorder.record_ptt_toggle()
+            self.studio_recorded_audio = audio
+            if audio is not None and len(audio) > 0:
+                duration = len(audio) / 16000
+                self.root.after(0, lambda: self.studio_rec_duration_var.set(f"Duration: {duration:.1f}s"))
+            self.root.after(0, lambda: self.studio_record_btn.configure(text="Record"))
+            self.studio_recording = False
+
+        threading.Thread(target=record_thread, daemon=True).start()
+
+    def studio_stop_recording(self):
+        self.studio_recording = False
+        if self.studio_recorder:
+            self.studio_recorder.recording = False
+
+    def studio_on_level(self, level):
+        width = int(level * 200)
+        color = "#4CAF50" if level < 0.7 else "#FF9800" if level < 0.9 else "#F44336"
+        self.studio_level_canvas.coords(self.studio_level_bar, 0, 0, width, 16)
+        self.studio_level_canvas.itemconfig(self.studio_level_bar, fill=color)
+
+    def studio_log_message(self, msg):
+        self.studio_output_queue.put(("log", msg))
+
+    def studio_generate(self):
+        if self.studio_generating:
+            return
+        self.studio_generating = True
+        self.studio_generate_btn.configure(state="disabled")
+        self.studio_play_btn.configure(state="disabled")
+        self.studio_progress.start()
+        self.studio_status_var.set("Starting...")
+
+        # Clear log
+        self.studio_log.configure(state="normal")
+        self.studio_log.delete("1.0", tk.END)
+        self.studio_log.configure(state="disabled")
+
+        threading.Thread(target=self._studio_generate_worker, daemon=True).start()
+        self._poll_studio_output()
+
+    def _studio_set_status(self, text):
+        """Thread-safe status update"""
+        self.root.after(0, lambda: self.studio_status_var.set(text))
+
+    def _studio_generate_worker(self):
+        try:
+            import numpy as np
+            import soundfile as sf
+            from tts_engines import create_tts_engine
+
+            mode = self.studio_input_mode.get()
+            text = ""
+
+            # Step 1: Get text
+            if mode == "text":
+                self._studio_set_status("Step 1/4: Reading input text...")
+                text = self.studio_text_input.get("1.0", tk.END).strip()
+                if not text:
+                    self.studio_log_message("ERROR: Please enter text to synthesize")
+                    return
+                self.studio_log_message(f"Input text ({len(text)} chars): {text[:100]}...")
+
+            elif mode == "mic":
+                if self.studio_recorded_audio is None or len(self.studio_recorded_audio) < 8000:
+                    self.studio_log_message("ERROR: No recording found. Please record audio first.")
+                    return
+                self._studio_set_status("Step 1/4: Transcribing recorded audio...")
+                self.studio_log_message("Transcribing recorded audio with WhisperX...")
+                text = self._studio_transcribe(self.studio_recorded_audio, 16000)
+                if not text:
+                    self.studio_log_message("ERROR: Could not transcribe audio")
+                    return
+                self.studio_log_message(f"Transcribed: {text}")
+                self.root.after(0, lambda t=text: self.studio_transcribed_var.set(f"Transcribed: {t}"))
+
+            elif mode == "file":
+                filepath = self.studio_file_var.get()
+                if not filepath or not os.path.exists(filepath):
+                    self.studio_log_message("ERROR: Please select a valid audio file")
+                    return
+                self._studio_set_status("Step 1/4: Loading and transcribing audio file...")
+                self.studio_log_message(f"Loading audio file: {os.path.basename(filepath)}")
+                audio_data, sr = sf.read(filepath)
+                if len(audio_data.shape) > 1:
+                    audio_data = audio_data.mean(axis=1)
+                if sr != 16000:
+                    import librosa
+                    audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
+                self.studio_log_message("Transcribing audio file with WhisperX...")
+                text = self._studio_transcribe(audio_data, 16000)
+                if not text:
+                    self.studio_log_message("ERROR: Could not transcribe audio")
+                    return
+                self.studio_log_message(f"Transcribed: {text}")
+
+            # Step 2: Create TTS engine
+            engine_name = self.studio_engine_var.get()
+            self._studio_set_status(f"Step 2/4: Loading {engine_name} engine...")
+            self.studio_log_message(f"Loading TTS engine: {engine_name}...")
+
+            import torch
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            dtype = torch.bfloat16 if device == "cuda" else torch.float32
+
+            kwargs = {}
+            if engine_name == "Qwen3-TTS":
+                kwargs["speaker"] = self.studio_qwen3_var.get()
+            elif engine_name == "OmniVoice":
+                kwargs["language"] = self.studio_omni_lang_var.get()
+                kwargs["voice_design"] = self.studio_omni_design_var.get()
+                kwargs["speed"] = float(self.studio_omni_speed_var.get())
+                voice_selection = self.studio_voice_var.get()
+                vp = VOICE_OPTIONS.get(voice_selection)
+                if vp and vp != "custom" and os.path.exists(str(vp)):
+                    kwargs["voice_path"] = os.path.abspath(vp)
+
+            # Reuse engine if same type already loaded
+            if self.studio_tts_engine_instance and self.studio_tts_engine_instance.name == engine_name:
+                engine = self.studio_tts_engine_instance
+                self.studio_log_message(f"Reusing loaded {engine_name} engine")
+            else:
+                if self.studio_tts_engine_instance:
+                    self.studio_tts_engine_instance.unload()
+                engine = create_tts_engine(engine_name, device=device, dtype=dtype, **kwargs)
+                self._studio_set_status(f"Step 2/4: Loading {engine_name} model to GPU...")
+                engine.load()
+                self.studio_tts_engine_instance = engine
+            self.studio_log_message(f"{engine_name} ready on {device}")
+
+            # Step 3: Get voice path for synthesis
+            voice_selection = self.studio_voice_var.get()
+            voice_path = None
+            if not voice_selection.startswith("Random"):
+                vp = VOICE_OPTIONS.get(voice_selection)
+                if vp and vp != "custom" and os.path.exists(str(vp)):
+                    voice_path = os.path.abspath(vp)
+
+            if voice_path:
+                self._studio_set_status("Step 2/4: Preparing voice reference transcript...")
+                self._ensure_voice_transcript(voice_path)
+
+            # Step 4: Synthesize (auto-chunk long texts)
+            import time as _time
+            sr = engine.get_sample_rate()
+
+            chunk_mode = self.studio_chunk_mode.get()
+            chunk_max = self.studio_chunk_size_var.get()
+            chunks = self._split_text_for_tts(text, mode=chunk_mode, max_chars=chunk_max)
+            total_chunks = len(chunks)
+            self.studio_log_message(f"Synthesizing with {engine_name} ({total_chunks} chunk{'s' if total_chunks>1 else ''})...")
+
+            audio_parts = []
+            t_start = _time.time()
+            for i, chunk in enumerate(chunks):
+                self._studio_set_status(f"Step 3/4: Synthesizing chunk {i+1}/{total_chunks}...")
+                if total_chunks > 1:
+                    self.studio_log_message(f"  Chunk {i+1}/{total_chunks}: {chunk[:60]}...")
+                chunk_audio = engine.synthesize(chunk, voice_path=voice_path)
+                if len(chunk_audio) > 0:
+                    audio_parts.append(chunk_audio)
+                    chunk_dur = len(chunk_audio) / sr
+                    elapsed = _time.time() - t_start
+                    self.studio_log_message(f"  Chunk {i+1} done: {chunk_dur:.1f}s audio ({elapsed:.1f}s elapsed)")
+            t_gen = _time.time() - t_start
+
+            # Combine all chunks
+            self._studio_set_status("Step 4/4: Combining audio and saving...")
+            if audio_parts:
+                silence = np.zeros(int(sr * 0.15), dtype=np.float32)
+                combined = []
+                for j, part in enumerate(audio_parts):
+                    combined.append(part)
+                    if j < len(audio_parts) - 1:
+                        combined.append(silence)
+                audio = np.concatenate(combined)
+            else:
+                audio = np.array([], dtype=np.float32)
+
+            self.studio_audio_data = audio
+            self.studio_sample_rate = sr
+
+            duration = len(audio) / sr if len(audio) > 0 else 0
+            self.studio_log_message(f"Generated {duration:.1f}s of audio in {t_gen:.1f}s (RTF: {t_gen/duration:.2f}x)" if duration > 0 else "No audio generated")
+
+            # Auto-save to Output folder
+            if len(audio) > 0:
+                self._studio_auto_save(audio, sr)
+
+            self.studio_output_queue.put(("done", f"Duration: {duration:.1f}s at {sr}Hz"))
+
+        except Exception as e:
+            self.studio_log_message(f"ERROR: {str(e)}")
+            import traceback
+            self.studio_log_message(traceback.format_exc())
+        finally:
+            self.studio_generating = False
+            self.root.after(0, self._studio_on_generate_done)
+
+    def _split_text_for_tts(self, text, mode="sentence", max_chars=300):
+        """Split long text into chunks for TTS processing.
+        mode='sentence': split only at sentence boundaries (. ! ?)
+        mode='chars': split at sentence boundaries but enforce max_chars limit
+        """
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        # Filter empty
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+        if not sentences:
+            return [text] if text.strip() else []
+
+        if mode == "sentence":
+            # Each sentence is its own chunk
+            return sentences
+
+        # mode == "chars": group sentences up to max_chars
+        chunks = []
+        current = ""
+        for sentence in sentences:
+            if len(current) + len(sentence) + 1 <= max_chars:
+                current = (current + " " + sentence).strip() if current else sentence
+            else:
+                if current:
+                    chunks.append(current)
+                # If single sentence is too long, split at commas
+                if len(sentence) > max_chars:
+                    parts = sentence.split(', ')
+                    sub = ""
+                    for part in parts:
+                        if len(sub) + len(part) + 2 <= max_chars:
+                            sub = (sub + ", " + part).strip(', ') if sub else part
+                        else:
+                            if sub:
+                                chunks.append(sub)
+                            sub = part
+                    current = sub
+                else:
+                    current = sentence
+
+        if current:
+            chunks.append(current)
+        return chunks if chunks else [text]
+
+    def _studio_auto_save(self, audio, sr):
+        """Auto-save generated audio to Output folder as MP3"""
+        try:
+            import numpy as np
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            output_dir = os.path.join(base_dir, OUTPUT_DIR)
+            os.makedirs(output_dir, exist_ok=True)
+
+            filename = self._generate_output_filename("mp3")
+            filepath = os.path.join(output_dir, filename)
+
+            from pydub import AudioSegment
+            audio_int16 = (audio * 32767).astype(np.int16)
+            segment = AudioSegment(
+                data=audio_int16.tobytes(),
+                sample_width=2,
+                frame_rate=sr,
+                channels=1
+            )
+            segment.export(filepath, format="mp3", bitrate="192k")
+            self._studio_last_saved_path = filepath
+            self.studio_log_message(f"Auto-saved: {filename}")
+        except Exception as e:
+            self.studio_log_message(f"WARNING: Auto-save failed: {e}")
+
+    def _ensure_voice_transcript(self, voice_path):
+        """Ensure a .txt transcript exists next to the voice sample. Transcribe if missing."""
+        base = os.path.splitext(voice_path)[0]
+        txt_path = base + ".txt"
+        if os.path.exists(txt_path):
+            return  # Already has transcript
+
+        self.studio_log_message(f"No transcript found for {os.path.basename(voice_path)}, transcribing...")
+        try:
+            import soundfile as sf
+            import numpy as np
+            audio_data, sr = sf.read(voice_path)
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=1)
+            if sr != 16000:
+                import librosa
+                audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
+
+            # Use medium model for higher quality transcription
+            text = self._studio_transcribe(audio_data, 16000, whisper_model="medium")
+            if text:
+                with open(txt_path, 'w', encoding='utf-8') as f:
+                    f.write(text)
+                self.studio_log_message(f"Transcript saved: {os.path.basename(txt_path)}")
+                self.studio_log_message(f"  Text: {text[:100]}...")
+            else:
+                self.studio_log_message("WARNING: Could not transcribe voice sample")
+        except Exception as e:
+            self.studio_log_message(f"WARNING: Transcript generation failed: {e}")
+
+    def _studio_transcribe(self, audio_np, sample_rate, whisper_model="base"):
+        """Standalone WhisperX transcription for Studio tab"""
+        import numpy as np
+        import soundfile as sf
+        import tempfile
+        import warnings
+        import torch
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            sf.write(f.name, audio_np, sample_rate, subtype='PCM_16')
+            temp_path = f.name
+
+        try:
+            import whisperx
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                model = whisperx.load_model(whisper_model, device, compute_type="float16")
+                result = model.transcribe(temp_path, batch_size=16, language="en")
+                del model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            if not result or "segments" not in result or not result["segments"]:
+                return ""
+            return " ".join([seg["text"] for seg in result["segments"]]).strip()
+        except Exception as e:
+            self.studio_log_message(f"Transcription error: {e}")
+            return ""
+        finally:
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+
+    def _studio_on_generate_done(self):
+        self.studio_progress.stop()
+        self.studio_generate_btn.configure(state="normal")
+        if self.studio_audio_data is not None and len(self.studio_audio_data) > 0:
+            self.studio_play_btn.configure(state="normal")
+            duration = len(self.studio_audio_data) / self.studio_sample_rate
+            self.studio_duration_var.set(f"Duration: {duration:.1f}s at {self.studio_sample_rate}Hz")
+            self.studio_status_var.set(f"Done - {duration:.1f}s (auto-saved to Output)")
+        else:
+            self.studio_status_var.set("Generation failed")
+
+    def _poll_studio_output(self):
+        try:
+            while True:
+                msg_type, data = self.studio_output_queue.get_nowait()
+                if msg_type == "log":
+                    self.studio_log.configure(state="normal")
+                    self.studio_log.insert(tk.END, data + "\n")
+                    self.studio_log.see(tk.END)
+                    self.studio_log.configure(state="disabled")
+                elif msg_type == "done":
+                    self.studio_duration_var.set(data)
+        except queue.Empty:
+            pass
+        if self.studio_generating:
+            self.root.after(100, self._poll_studio_output)
+
+    def studio_play(self):
+        """Open the last saved MP3 in the system's default audio player"""
+        if not hasattr(self, '_studio_last_saved_path') or not self._studio_last_saved_path:
+            return
+        if not os.path.exists(self._studio_last_saved_path):
+            return
+        os.startfile(self._studio_last_saved_path)
+
+    def _generate_output_filename(self, ext="mp3"):
+        """Generate output filename: VoiceName_Engine_YYYYMMDD_HHMMSS.ext"""
+        from datetime import datetime
+        voice = self.studio_voice_var.get()
+        # Clean voice name for filename
+        voice_clean = voice.replace("Sample: ", "").replace("Trained: ", "")
+        voice_clean = re.sub(r'[^\w\-]', '_', voice_clean).strip('_')
+        if not voice_clean or voice_clean.startswith("Random"):
+            voice_clean = "DefaultVoice"
+        engine = self.studio_engine_var.get().replace("-", "")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{voice_clean}_{engine}_{timestamp}.{ext}"
+
+    def studio_save_mp3(self):
+        if self.studio_audio_data is None:
+            return
+
+        # Ensure Output directory exists
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        output_dir = os.path.join(base_dir, OUTPUT_DIR)
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate default filename
+        default_name = self._generate_output_filename("mp3")
+
+        filepath = filedialog.asksaveasfilename(
+            initialdir=output_dir,
+            initialfile=default_name,
+            defaultextension=".mp3",
+            filetypes=[("MP3 Audio", "*.mp3"), ("WAV Audio", "*.wav"), ("All Files", "*.*")]
+        )
+        if not filepath:
+            return
+        try:
+            import numpy as np
+            if filepath.lower().endswith(".wav"):
+                import soundfile as sf
+                sf.write(filepath, self.studio_audio_data, self.studio_sample_rate, subtype='PCM_16')
+            else:
+                from pydub import AudioSegment
+                audio_int16 = (self.studio_audio_data * 32767).astype(np.int16)
+                segment = AudioSegment(
+                    data=audio_int16.tobytes(),
+                    sample_width=2,
+                    frame_rate=self.studio_sample_rate,
+                    channels=1
+                )
+                segment.export(filepath, format="mp3", bitrate="192k")
+            self.studio_status_var.set(f"Saved: {os.path.basename(filepath)}")
+            self.studio_log_message(f"Saved to: {filepath}")
+        except Exception as e:
+            messagebox.showerror("Save Error", f"Could not save file: {e}")
+
     def _create_train_widgets(self):
         """Create widgets for the Train Voice tab"""
         # Container frame
-        train_container = ttk.Frame(self.train_frame, padding="10")
+        train_container = ctk.CTkFrame(self.train_frame, fg_color="transparent")
         train_container.pack(fill=tk.BOTH, expand=True)
 
         # --- Data Source Section ---
-        data_frame = ttk.LabelFrame(train_container, text="Training Data", padding="10")
-        data_frame.pack(fill=tk.X, pady=5)
+        data_frame_outer, data_frame = create_section(train_container, "Training Data")
+        data_frame_outer.pack(fill=tk.X, pady=5)
 
         # Data source mode selector
-        mode_row = ttk.Frame(data_frame)
+        mode_row = ctk.CTkFrame(data_frame)
         mode_row.pack(fill=tk.X, pady=2)
-        ttk.Label(mode_row, text="Source:").pack(side=tk.LEFT)
+        ctk.CTkLabel(mode_row, text="Source:").pack(side=tk.LEFT)
         self.data_source_mode = tk.StringVar(value="folder")
-        ttk.Radiobutton(mode_row, text="Folder with pairs", variable=self.data_source_mode,
+        ctk.CTkRadioButton(mode_row, text="Folder with pairs", variable=self.data_source_mode,
                         value="folder", command=self.on_data_source_change).pack(side=tk.LEFT, padx=5)
-        ttk.Radiobutton(mode_row, text="Single audio file (auto-transcribe)", variable=self.data_source_mode,
+        ctk.CTkRadioButton(mode_row, text="Single audio file (auto-transcribe)", variable=self.data_source_mode,
                         value="single", command=self.on_data_source_change).pack(side=tk.LEFT, padx=5)
 
         # --- Folder mode widgets ---
-        self.folder_widgets_frame = ttk.Frame(data_frame)
+        self.folder_widgets_frame = ctk.CTkFrame(data_frame)
         self.folder_widgets_frame.pack(fill=tk.X, pady=2)
 
-        folder_row = ttk.Frame(self.folder_widgets_frame)
+        folder_row = ctk.CTkFrame(self.folder_widgets_frame)
         folder_row.pack(fill=tk.X, pady=2)
 
-        ttk.Label(folder_row, text="Audio Folder:").pack(side=tk.LEFT)
+        ctk.CTkLabel(folder_row, text="Audio Folder:").pack(side=tk.LEFT)
         self.train_folder_var = tk.StringVar()
-        self.train_folder_entry = ttk.Entry(folder_row, textvariable=self.train_folder_var, width=50)
+        self.train_folder_entry = ctk.CTkEntry(folder_row, textvariable=self.train_folder_var, width=50)
         self.train_folder_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(folder_row, text="Browse...", command=self.browse_train_folder).pack(side=tk.LEFT)
+        ctk.CTkButton(folder_row, text="Browse...", command=self.browse_train_folder).pack(side=tk.LEFT)
 
-        self.folder_format_label = ttk.Label(self.folder_widgets_frame,
+        self.folder_format_label = ctk.CTkLabel(self.folder_widgets_frame,
                                               text="Expected format: audio1.wav + audio1.txt, audio2.mp3 + audio2.txt, etc.",
-                                              font=('Helvetica', 8), foreground="gray")
+                                              font=('Helvetica', 8), text_color="gray")
         self.folder_format_label.pack(anchor=tk.W)
 
         # --- Single file mode widgets ---
-        self.single_file_frame = ttk.Frame(data_frame)
+        self.single_file_frame = ctk.CTkFrame(data_frame)
         # Initially hidden, shown when single file mode selected
 
-        single_file_row = ttk.Frame(self.single_file_frame)
+        single_file_row = ctk.CTkFrame(self.single_file_frame)
         single_file_row.pack(fill=tk.X, pady=2)
 
-        ttk.Label(single_file_row, text="Audio File:").pack(side=tk.LEFT)
+        ctk.CTkLabel(single_file_row, text="Audio File:").pack(side=tk.LEFT)
         self.single_audio_var = tk.StringVar()
-        self.single_audio_entry = ttk.Entry(single_file_row, textvariable=self.single_audio_var, width=50)
+        self.single_audio_entry = ctk.CTkEntry(single_file_row, textvariable=self.single_audio_var, width=50)
         self.single_audio_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-        ttk.Button(single_file_row, text="Browse...", command=self.browse_single_audio).pack(side=tk.LEFT)
+        ctk.CTkButton(single_file_row, text="Browse...", command=self.browse_single_audio).pack(side=tk.LEFT)
 
         # Preprocessing options
-        preprocess_row = ttk.Frame(self.single_file_frame)
+        preprocess_row = ctk.CTkFrame(self.single_file_frame)
         preprocess_row.pack(fill=tk.X, pady=2)
 
-        ttk.Label(preprocess_row, text="Whisper Model:").pack(side=tk.LEFT)
+        ctk.CTkLabel(preprocess_row, text="Whisper Model:").pack(side=tk.LEFT)
         self.preprocess_whisper_var = tk.StringVar(value="base")
-        ttk.Combobox(preprocess_row, textvariable=self.preprocess_whisper_var,
+        ctk.CTkComboBox(preprocess_row, variable=self.preprocess_whisper_var,
                      values=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-                     state="readonly", width=10).pack(side=tk.LEFT, padx=5)
+                     width=120).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(preprocess_row, text="Min segment (s):").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(preprocess_row, text="Min segment (s):").pack(side=tk.LEFT, padx=(10, 0))
         self.min_segment_var = tk.DoubleVar(value=2.0)
-        ttk.Spinbox(preprocess_row, from_=0.5, to=10.0, increment=0.5,
+        tk.Spinbox(preprocess_row, from_=0.5, to=10.0, increment=0.5,
                     textvariable=self.min_segment_var, width=6).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(preprocess_row, text="Max segment (s):").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkLabel(preprocess_row, text="Max segment (s):").pack(side=tk.LEFT, padx=(10, 0))
         self.max_segment_var = tk.DoubleVar(value=15.0)
-        ttk.Spinbox(preprocess_row, from_=5.0, to=30.0, increment=1.0,
+        tk.Spinbox(preprocess_row, from_=5.0, to=30.0, increment=1.0,
                     textvariable=self.max_segment_var, width=6).pack(side=tk.LEFT, padx=5)
 
-        self.preprocess_btn = ttk.Button(self.single_file_frame, text="Preprocess with WhisperX",
+        self.preprocess_btn = ctk.CTkButton(self.single_file_frame, text="Preprocess with WhisperX",
                                           command=self.start_preprocessing)
         self.preprocess_btn.pack(anchor=tk.W, pady=5)
 
-        single_info = ttk.Label(self.single_file_frame,
+        single_info = ctk.CTkLabel(self.single_file_frame,
                                  text="Preprocesses long audio: transcribes with WhisperX, splits into segments, creates training pairs",
-                                 font=('Helvetica', 8), foreground="gray")
+                                 font=('Helvetica', 8), text_color="gray")
         single_info.pack(anchor=tk.W)
 
         # Folder info label (shared between modes)
         self.folder_info_var = tk.StringVar(value="Select a folder containing audio files with matching .txt transcripts")
-        ttk.Label(data_frame, textvariable=self.folder_info_var, font=('Helvetica', 9, 'italic')).pack(anchor=tk.W, pady=2)
+        ctk.CTkLabel(data_frame, textvariable=self.folder_info_var, font=('Helvetica', 9, 'italic')).pack(anchor=tk.W, pady=2)
 
         # --- Training Settings Section ---
-        settings_frame = ttk.LabelFrame(train_container, text="Training Settings", padding="10")
-        settings_frame.pack(fill=tk.X, pady=5)
+        settings_frame_outer, settings_frame = create_section(train_container, "Training Settings")
+        settings_frame_outer.pack(fill=tk.X, pady=5)
 
         # Voice name
-        name_row = ttk.Frame(settings_frame)
+        name_row = ctk.CTkFrame(settings_frame)
         name_row.pack(fill=tk.X, pady=2)
-        ttk.Label(name_row, text="Voice Name:").pack(side=tk.LEFT)
+        ctk.CTkLabel(name_row, text="Voice Name:").pack(side=tk.LEFT)
         self.voice_name_var = tk.StringVar()
-        ttk.Entry(name_row, textvariable=self.voice_name_var, width=30).pack(side=tk.LEFT, padx=5)
-        ttk.Label(name_row, text="(used to identify trained voice)", font=('Helvetica', 8), foreground="gray").pack(side=tk.LEFT)
+        ctk.CTkEntry(name_row, textvariable=self.voice_name_var, width=250).pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(name_row, text="(used to identify trained voice)", font=('Helvetica', 8), text_color="gray").pack(side=tk.LEFT)
 
         # Sample count selector
-        samples_row = ttk.Frame(settings_frame)
+        samples_row = ctk.CTkFrame(settings_frame)
         samples_row.pack(fill=tk.X, pady=2)
-        ttk.Label(samples_row, text="Samples to use:").pack(side=tk.LEFT)
+        ctk.CTkLabel(samples_row, text="Samples to use:").pack(side=tk.LEFT)
         self.sample_count_var = tk.IntVar(value=10)
-        self.sample_spin = ttk.Spinbox(samples_row, from_=1, to=1000, textvariable=self.sample_count_var, width=10)
+        self.sample_spin = tk.Spinbox(samples_row, from_=1, to=1000, textvariable=self.sample_count_var, width=10)
         self.sample_spin.pack(side=tk.LEFT, padx=5)
-        ttk.Label(samples_row, text="(more samples = better quality, longer training)",
+        ctk.CTkLabel(samples_row, text="(more samples = better quality, longer training)",
                   font=('Helvetica', 9, 'italic')).pack(side=tk.LEFT)
 
         # Epochs selector
-        epochs_row = ttk.Frame(settings_frame)
+        epochs_row = ctk.CTkFrame(settings_frame)
         epochs_row.pack(fill=tk.X, pady=2)
-        ttk.Label(epochs_row, text="Training Epochs:").pack(side=tk.LEFT)
+        ctk.CTkLabel(epochs_row, text="Training Epochs:").pack(side=tk.LEFT)
         self.epochs_var = tk.IntVar(value=3)
-        ttk.Spinbox(epochs_row, from_=1, to=10, textvariable=self.epochs_var, width=10).pack(side=tk.LEFT, padx=5)
-        ttk.Label(epochs_row, text="(more epochs = better fit, risk of overfitting)",
+        tk.Spinbox(epochs_row, from_=1, to=10, textvariable=self.epochs_var, width=10).pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(epochs_row, text="(more epochs = better fit, risk of overfitting)",
                   font=('Helvetica', 9, 'italic')).pack(side=tk.LEFT)
 
         # Model info (fixed)
-        model_row = ttk.Frame(settings_frame)
+        model_row = ctk.CTkFrame(settings_frame)
         model_row.pack(fill=tk.X, pady=2)
-        ttk.Label(model_row, text="Model: MossTTSLocal 1.7B", font=('Helvetica', 9)).pack(side=tk.LEFT)
-        ttk.Label(model_row, text="(optimized for RTX 4090)", font=('Helvetica', 8), foreground="gray").pack(side=tk.LEFT, padx=5)
+        ctk.CTkLabel(model_row, text="Model: MossTTSLocal 1.7B", font=('Helvetica', 9)).pack(side=tk.LEFT)
+        ctk.CTkLabel(model_row, text="(optimized for RTX 4090)", font=('Helvetica', 8), text_color="gray").pack(side=tk.LEFT, padx=5)
 
         # --- Progress Section ---
-        progress_frame = ttk.LabelFrame(train_container, text="Training Progress", padding="10")
-        progress_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        progress_frame_outer, progress_frame = create_section(train_container, "Training Progress")
+        progress_frame_outer.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # Progress bar
-        self.train_progress_var = tk.DoubleVar(value=0)
-        self.train_progress = ttk.Progressbar(progress_frame, variable=self.train_progress_var,
-                                               maximum=100, mode='determinate')
+        self.train_progress = ctk.CTkProgressBar(progress_frame)
         self.train_progress.pack(fill=tk.X, pady=5)
+        self.train_progress.set(0)
 
         # Status label
         self.train_status_var = tk.StringVar(value="Ready to train")
-        ttk.Label(progress_frame, textvariable=self.train_status_var, font=('Helvetica', 9, 'bold')).pack(anchor=tk.W)
+        ctk.CTkLabel(progress_frame, textvariable=self.train_status_var, font=('Helvetica', 9, 'bold')).pack(anchor=tk.W)
 
         # Log output
-        self.train_log = scrolledtext.ScrolledText(progress_frame, wrap=tk.WORD, height=15,
-                                                    font=('Consolas', 9), state=tk.DISABLED)
+        self.train_log = tk.Text(progress_frame, wrap="word", height=15,
+                                  font=('Consolas', 9), state="disabled",
+                                  bg="#2b2b2b", fg="#dcdcdc", relief="flat", borderwidth=0, padx=8, pady=8)
         self.train_log.pack(fill=tk.BOTH, expand=True, pady=5)
 
         # --- Control Buttons ---
-        btn_frame = ttk.Frame(train_container)
+        btn_frame = ctk.CTkFrame(train_container)
         btn_frame.pack(fill=tk.X, pady=10)
 
-        self.scan_folder_btn = ttk.Button(btn_frame, text="Scan Folder", command=self.scan_training_folder)
+        self.scan_folder_btn = ctk.CTkButton(btn_frame, text="Scan Folder", command=self.scan_training_folder)
         self.scan_folder_btn.pack(side=tk.LEFT, padx=5)
 
-        self.cancel_train_btn = ttk.Button(btn_frame, text="Cancel", command=self.cancel_training, state=tk.DISABLED)
+        self.cancel_train_btn = ctk.CTkButton(btn_frame, text="Cancel", command=self.cancel_training, state="disabled")
         self.cancel_train_btn.pack(side=tk.RIGHT, padx=5)
 
-        self.start_train_btn = ttk.Button(btn_frame, text="Start Training", command=self.start_training)
+        self.start_train_btn = ctk.CTkButton(btn_frame, text="Start Training", command=self.start_training)
         self.start_train_btn.pack(side=tk.RIGHT, padx=5)
 
     def on_persona_change(self, event=None):
@@ -553,7 +1225,7 @@ class VoiceChatApp:
     def refresh_llms(self):
         """Refresh the list of available Ollama models"""
         models = get_ollama_models()
-        self.ollama_combo['values'] = models
+        self.ollama_combo.configure(values=models)
         self.set_status(f"Found {len(models)} models", "green")
 
     def set_status(self, text, color="gray"):
@@ -570,19 +1242,19 @@ class VoiceChatApp:
 
     def append_conv(self, text, tag=None):
         """Append text to conversation log"""
-        self.conv_text.configure(state=tk.NORMAL)
+        self.conv_text.configure(state="normal")
         if tag:
             self.conv_text.insert(tk.END, text, tag)
         else:
             self.conv_text.insert(tk.END, text)
         self.conv_text.see(tk.END)
-        self.conv_text.configure(state=tk.DISABLED)
+        self.conv_text.configure(state="disabled")
 
     def clear_log(self):
         """Clear conversation log"""
-        self.conv_text.configure(state=tk.NORMAL)
+        self.conv_text.configure(state="normal")
         self.conv_text.delete("1.0", tk.END)
-        self.conv_text.configure(state=tk.DISABLED)
+        self.conv_text.configure(state="disabled")
 
     def poll_output(self):
         """Poll for output from the chat thread"""
@@ -621,9 +1293,9 @@ class VoiceChatApp:
         self.save_config()
 
         # Update UI state
-        self.start_btn.configure(state=tk.DISABLED)
-        self.stop_btn.configure(state=tk.NORMAL)
-        self.prompt_text.configure(state=tk.DISABLED)
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.prompt_text.configure(state="disabled")
         self.set_status("Starting...", "orange")
 
         # Get settings
@@ -671,9 +1343,9 @@ class VoiceChatApp:
         self.update_level(0)
 
         # Update UI state
-        self.start_btn.configure(state=tk.NORMAL)
-        self.stop_btn.configure(state=tk.DISABLED)
-        self.prompt_text.configure(state=tk.NORMAL)
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.prompt_text.configure(state="normal")
 
         self.output_queue.put(("system", "Chat stopped by user"))
         self.set_status("Stopped - Click Start to begin again", "gray")
@@ -764,9 +1436,9 @@ class VoiceChatApp:
 
     def on_chat_stopped(self):
         """Called when chat thread ends"""
-        self.start_btn.configure(state=tk.NORMAL)
-        self.stop_btn.configure(state=tk.DISABLED)
-        self.prompt_text.configure(state=tk.NORMAL)
+        self.start_btn.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self.prompt_text.configure(state="normal")
         self.set_status("Stopped - Click Start to begin again", "gray")
         self.update_level(0)
 
@@ -816,13 +1488,13 @@ class VoiceChatApp:
             return
 
         # Disable button during processing
-        self.preprocess_btn.configure(state=tk.DISABLED)
-        self.train_progress_var.set(0)
+        self.preprocess_btn.configure(state="disabled")
+        self.train_progress.set(0)
 
         # Clear log
-        self.train_log.configure(state=tk.NORMAL)
+        self.train_log.configure(state="normal")
         self.train_log.delete("1.0", tk.END)
-        self.train_log.configure(state=tk.DISABLED)
+        self.train_log.configure(state="disabled")
 
         # Start preprocessing thread
         self.preprocessing_running = True
@@ -1046,7 +1718,7 @@ class VoiceChatApp:
 
         finally:
             self.preprocessing_running = False
-            self.root.after(0, lambda: self.preprocess_btn.configure(state=tk.NORMAL))
+            self.root.after(0, lambda: self.preprocess_btn.configure(state="normal"))
 
     def scan_training_folder(self):
         """Scan folder for audio+transcript pairs"""
@@ -1133,14 +1805,14 @@ class VoiceChatApp:
 
         # Update UI state
         self.training_running = True
-        self.start_train_btn.configure(state=tk.DISABLED)
-        self.cancel_train_btn.configure(state=tk.NORMAL)
-        self.train_progress_var.set(0)
+        self.start_train_btn.configure(state="disabled")
+        self.cancel_train_btn.configure(state="normal")
+        self.train_progress.set(0)
 
         # Clear log
-        self.train_log.configure(state=tk.NORMAL)
+        self.train_log.configure(state="normal")
         self.train_log.delete("1.0", tk.END)
-        self.train_log.configure(state=tk.DISABLED)
+        self.train_log.configure(state="disabled")
 
         # Start training thread
         self.train_thread = threading.Thread(
@@ -1324,12 +1996,12 @@ class VoiceChatApp:
             while True:
                 msg_type, data = self.train_output_queue.get_nowait()
                 if msg_type == "log":
-                    self.train_log.configure(state=tk.NORMAL)
+                    self.train_log.configure(state="normal")
                     self.train_log.insert(tk.END, data + "\n")
                     self.train_log.see(tk.END)
-                    self.train_log.configure(state=tk.DISABLED)
+                    self.train_log.configure(state="disabled")
                 elif msg_type == "progress":
-                    self.train_progress_var.set(data)
+                    self.train_progress.set(data / 100.0)
         except queue.Empty:
             pass
 
@@ -1345,8 +2017,8 @@ class VoiceChatApp:
 
     def on_training_complete(self):
         """Called when training finishes or is cancelled"""
-        self.start_train_btn.configure(state=tk.NORMAL)
-        self.cancel_train_btn.configure(state=tk.DISABLED)
+        self.start_train_btn.configure(state="normal")
+        self.cancel_train_btn.configure(state="disabled")
 
     def refresh_trained_voices(self):
         """Refresh the voice dropdown with any newly trained voices"""
@@ -1361,7 +2033,7 @@ class VoiceChatApp:
                 all_voices.insert(-1, voice_name)
 
         # Update combobox
-        self.voice_combo['values'] = all_voices
+        self.voice_combo.configure(values=all_voices)
 
     def on_closing(self):
         """Handle window close"""
@@ -2090,7 +2762,9 @@ class SimplifiedVoiceChat:
 
 
 def main():
-    root = tk.Tk()
+    ctk.set_appearance_mode("Dark")
+    ctk.set_default_color_theme("blue")
+    root = ctk.CTk()
     app = VoiceChatApp(root)
     root.mainloop()
 

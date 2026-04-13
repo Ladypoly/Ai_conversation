@@ -1,8 +1,9 @@
 @echo off
-title Voice Chat AI
+title Voice Chat AI (Debug)
 cd /d "%~dp0"
 
-REM Check if venv exists
+REM Debug launcher - shows console output for troubleshooting
+
 if not exist "venv_voice_ai\Scripts\python.exe" (
     echo ERROR: Virtual environment not found!
     echo Please run setup_install.bat first.
@@ -10,18 +11,15 @@ if not exist "venv_voice_ai\Scripts\python.exe" (
     exit /b 1
 )
 
-REM Add venv Scripts to PATH (for SoX and other tools)
 set "PATH=%~dp0venv_voice_ai\Scripts;%PATH%"
 
-REM Add FFmpeg to PATH for voice cloning support (torchcodec needs FFmpeg DLLs)
-REM Try miniconda's FFmpeg first (has shared libraries)
 if exist "%USERPROFILE%\miniconda3\Library\bin\avcodec-58.dll" (
     set "PATH=%USERPROFILE%\miniconda3\Library\bin;%PATH%"
 )
-REM Also try standard FFmpeg locations
 if exist "%USERPROFILE%\Documents\ffmpeg-7.1-full_build\bin\ffmpeg.exe" (
     set "PATH=%USERPROFILE%\Documents\ffmpeg-7.1-full_build\bin;%PATH%"
 )
 
-REM Run launcher without console window
-start "" "venv_voice_ai\Scripts\pythonw.exe" launcher.py
+REM Run with console visible for debugging
+"venv_voice_ai\Scripts\python.exe" launcher.py
+pause
