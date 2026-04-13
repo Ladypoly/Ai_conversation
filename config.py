@@ -16,8 +16,10 @@ OLLAMA_MODEL = "qwen3.5:4b"
 OLLAMA_URL = "http://localhost:11434"
 
 TTS_MODEL = "OpenMOSS-Team/MOSS-TTS-Realtime"
-TTS_ENGINE = "MOSS-TTS"  # Options: "MOSS-TTS", "Qwen3-TTS"
+TTS_ENGINE = "MOSS-TTS"  # Options: "MOSS-TTS", "Qwen3-TTS", "OmniVoice"
 QWEN3_TTS_SPEAKER = "Chelsie"  # For Qwen3-TTS: Chelsie, Ethan, Airi, Zara, Rafaela, Sky, Theo, Nova, Harper
+OMNIVOICE_LANGUAGE = "en"
+OMNIVOICE_SPEED = 1.0
 
 # Voice Activity Detection settings
 VAD_THRESHOLD = 0.5  # Silero VAD threshold (0.0 - 1.0)

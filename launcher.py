@@ -24,8 +24,12 @@ import subprocess
 CONFIG_FILE = "user_config.json"
 
 # TTS Engine options
-TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS"]
+TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS", "OmniVoice"]
 QWEN3_SPEAKERS = ["serena", "aiden", "dylan", "eric", "ono_anna", "ryan", "sohee", "uncle_fu", "vivian"]
+OMNIVOICE_LANGUAGES = [
+    "en", "zh", "ja", "ko", "fr", "de", "es", "pt", "ru", "ar",
+    "it", "nl", "pl", "tr", "vi", "th", "id", "hi", "sv", "cs"
+]
 
 DEFAULT_PERSONAS = {
     "Helpful Assistant": "You are a helpful voice assistant. Keep your responses concise and conversational - aim for 1-3 sentences unless more detail is needed. Be friendly and natural.",
@@ -122,6 +126,7 @@ class VoiceChatApp:
         # Training state
         self.train_thread = None
         self.training_running = False
+        self.preprocessing_running = False
         self.train_output_queue = queue.Queue()
         self.training_pairs = []
         self.trained_voice_paths = {}
@@ -160,7 +165,10 @@ class VoiceChatApp:
             "fast_mode": self.fast_mode_var.get(),
             "streaming_mode": self.streaming_mode_var.get(),
             "tts_engine": self.tts_engine_var.get(),
-            "qwen3_speaker": self.qwen3_speaker_var.get()
+            "qwen3_speaker": self.qwen3_speaker_var.get(),
+            "omni_language": self.omni_lang_var.get(),
+            "omni_voice_design": self.omni_design_var.get(),
+            "omni_speed": self.omni_speed_var.get()
         }
         with open(CONFIG_FILE, 'w') as f:
             json.dump(config, f, indent=2)
@@ -261,7 +269,24 @@ class VoiceChatApp:
         self.qwen3_speaker_combo = ttk.Combobox(row3, textvariable=self.qwen3_speaker_var,
                                                  values=QWEN3_SPEAKERS, state="readonly", width=10)
 
-        # Show/hide speaker based on current engine selection
+        # OmniVoice settings row (only visible when OmniVoice selected)
+        self.omni_settings_row = ttk.Frame(self.settings_frame)
+
+        ttk.Label(self.omni_settings_row, text="Language:").pack(side=tk.LEFT)
+        self.omni_lang_var = tk.StringVar(value=self.saved_config.get("omni_language", "en"))
+        ttk.Combobox(self.omni_settings_row, textvariable=self.omni_lang_var,
+                     values=OMNIVOICE_LANGUAGES, state="readonly", width=5).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(self.omni_settings_row, text="Voice Design:").pack(side=tk.LEFT, padx=(10, 0))
+        self.omni_design_var = tk.StringVar(value=self.saved_config.get("omni_voice_design", ""))
+        ttk.Entry(self.omni_settings_row, textvariable=self.omni_design_var, width=30).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(self.omni_settings_row, text="Speed:").pack(side=tk.LEFT, padx=(10, 0))
+        self.omni_speed_var = tk.DoubleVar(value=float(self.saved_config.get("omni_speed", 1.0)))
+        ttk.Spinbox(self.omni_settings_row, from_=0.5, to=2.0, increment=0.1,
+                    textvariable=self.omni_speed_var, width=5).pack(side=tk.LEFT, padx=2)
+
+        # Show/hide engine-specific settings based on current engine selection
         self.on_tts_engine_change()
 
         # System prompt
@@ -343,8 +368,21 @@ class VoiceChatApp:
         data_frame = ttk.LabelFrame(train_container, text="Training Data", padding="10")
         data_frame.pack(fill=tk.X, pady=5)
 
-        # Folder selector row
-        folder_row = ttk.Frame(data_frame)
+        # Data source mode selector
+        mode_row = ttk.Frame(data_frame)
+        mode_row.pack(fill=tk.X, pady=2)
+        ttk.Label(mode_row, text="Source:").pack(side=tk.LEFT)
+        self.data_source_mode = tk.StringVar(value="folder")
+        ttk.Radiobutton(mode_row, text="Folder with pairs", variable=self.data_source_mode,
+                        value="folder", command=self.on_data_source_change).pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(mode_row, text="Single audio file (auto-transcribe)", variable=self.data_source_mode,
+                        value="single", command=self.on_data_source_change).pack(side=tk.LEFT, padx=5)
+
+        # --- Folder mode widgets ---
+        self.folder_widgets_frame = ttk.Frame(data_frame)
+        self.folder_widgets_frame.pack(fill=tk.X, pady=2)
+
+        folder_row = ttk.Frame(self.folder_widgets_frame)
         folder_row.pack(fill=tk.X, pady=2)
 
         ttk.Label(folder_row, text="Audio Folder:").pack(side=tk.LEFT)
@@ -353,14 +391,56 @@ class VoiceChatApp:
         self.train_folder_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
         ttk.Button(folder_row, text="Browse...", command=self.browse_train_folder).pack(side=tk.LEFT)
 
-        # Folder info label
+        self.folder_format_label = ttk.Label(self.folder_widgets_frame,
+                                              text="Expected format: audio1.wav + audio1.txt, audio2.mp3 + audio2.txt, etc.",
+                                              font=('Helvetica', 8), foreground="gray")
+        self.folder_format_label.pack(anchor=tk.W)
+
+        # --- Single file mode widgets ---
+        self.single_file_frame = ttk.Frame(data_frame)
+        # Initially hidden, shown when single file mode selected
+
+        single_file_row = ttk.Frame(self.single_file_frame)
+        single_file_row.pack(fill=tk.X, pady=2)
+
+        ttk.Label(single_file_row, text="Audio File:").pack(side=tk.LEFT)
+        self.single_audio_var = tk.StringVar()
+        self.single_audio_entry = ttk.Entry(single_file_row, textvariable=self.single_audio_var, width=50)
+        self.single_audio_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        ttk.Button(single_file_row, text="Browse...", command=self.browse_single_audio).pack(side=tk.LEFT)
+
+        # Preprocessing options
+        preprocess_row = ttk.Frame(self.single_file_frame)
+        preprocess_row.pack(fill=tk.X, pady=2)
+
+        ttk.Label(preprocess_row, text="Whisper Model:").pack(side=tk.LEFT)
+        self.preprocess_whisper_var = tk.StringVar(value="base")
+        ttk.Combobox(preprocess_row, textvariable=self.preprocess_whisper_var,
+                     values=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
+                     state="readonly", width=10).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(preprocess_row, text="Min segment (s):").pack(side=tk.LEFT, padx=(10, 0))
+        self.min_segment_var = tk.DoubleVar(value=2.0)
+        ttk.Spinbox(preprocess_row, from_=0.5, to=10.0, increment=0.5,
+                    textvariable=self.min_segment_var, width=6).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(preprocess_row, text="Max segment (s):").pack(side=tk.LEFT, padx=(10, 0))
+        self.max_segment_var = tk.DoubleVar(value=15.0)
+        ttk.Spinbox(preprocess_row, from_=5.0, to=30.0, increment=1.0,
+                    textvariable=self.max_segment_var, width=6).pack(side=tk.LEFT, padx=5)
+
+        self.preprocess_btn = ttk.Button(self.single_file_frame, text="Preprocess with WhisperX",
+                                          command=self.start_preprocessing)
+        self.preprocess_btn.pack(anchor=tk.W, pady=5)
+
+        single_info = ttk.Label(self.single_file_frame,
+                                 text="Preprocesses long audio: transcribes with WhisperX, splits into segments, creates training pairs",
+                                 font=('Helvetica', 8), foreground="gray")
+        single_info.pack(anchor=tk.W)
+
+        # Folder info label (shared between modes)
         self.folder_info_var = tk.StringVar(value="Select a folder containing audio files with matching .txt transcripts")
         ttk.Label(data_frame, textvariable=self.folder_info_var, font=('Helvetica', 9, 'italic')).pack(anchor=tk.W, pady=2)
-
-        # File format info
-        format_info = ttk.Label(data_frame, text="Expected format: audio1.wav + audio1.txt, audio2.mp3 + audio2.txt, etc.",
-                                 font=('Helvetica', 8), foreground="gray")
-        format_info.pack(anchor=tk.W)
 
         # --- Training Settings Section ---
         settings_frame = ttk.LabelFrame(train_container, text="Training Settings", padding="10")
@@ -453,16 +533,22 @@ class VoiceChatApp:
                 self.voice_var.set("Default (No Clone)")
 
     def on_tts_engine_change(self, event=None):
-        """Handle TTS engine selection change - show/hide speaker selector"""
+        """Handle TTS engine selection change - show/hide engine-specific settings"""
         engine = self.tts_engine_var.get()
+
+        # Qwen3-TTS speaker controls
         if engine == "Qwen3-TTS":
-            # Show speaker selector
             self.qwen3_speaker_label.pack(side=tk.LEFT, padx=(15, 0))
             self.qwen3_speaker_combo.pack(side=tk.LEFT, padx=5)
         else:
-            # Hide speaker selector
             self.qwen3_speaker_label.pack_forget()
             self.qwen3_speaker_combo.pack_forget()
+
+        # OmniVoice settings row
+        if engine == "OmniVoice":
+            self.omni_settings_row.pack(fill=tk.X, pady=2)
+        else:
+            self.omni_settings_row.pack_forget()
 
     def refresh_llms(self):
         """Refresh the list of available Ollama models"""
@@ -562,12 +648,15 @@ class VoiceChatApp:
         # Get TTS engine settings
         tts_engine = self.tts_engine_var.get()
         qwen3_speaker = self.qwen3_speaker_var.get()
+        omni_language = self.omni_lang_var.get()
+        omni_voice_design = self.omni_design_var.get()
+        omni_speed = float(self.omni_speed_var.get() or 1.0)
 
         # Start chat thread
         self.chat_running = True
         self.chat_thread = threading.Thread(
             target=self.run_chat_loop,
-            args=(system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path, tts_engine, qwen3_speaker),
+            args=(system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path, tts_engine, qwen3_speaker, omni_language, omni_voice_design, omni_speed),
             daemon=True
         )
         self.chat_thread.start()
@@ -589,7 +678,7 @@ class VoiceChatApp:
         self.output_queue.put(("system", "Chat stopped by user"))
         self.set_status("Stopped - Click Start to begin again", "gray")
 
-    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None, tts_engine="MOSS-TTS", qwen3_speaker="serena"):
+    def run_chat_loop(self, system_prompt, input_mode, whisper_model, ollama_model, voice_path, fast_mode, trained_model_path=None, tts_engine="MOSS-TTS", qwen3_speaker="serena", omni_language="en", omni_voice_design="", omni_speed=1.0):
         """Run the voice chat loop in a background thread"""
         try:
             import torch
@@ -610,6 +699,10 @@ class VoiceChatApp:
             self.output_queue.put(("system", f"TTS Engine: {tts_engine}"))
             if tts_engine == "Qwen3-TTS":
                 self.output_queue.put(("system", f"Qwen3 Speaker: {qwen3_speaker}"))
+            elif tts_engine == "OmniVoice":
+                self.output_queue.put(("system", f"OmniVoice Language: {omni_language}, Speed: {omni_speed}"))
+                if omni_voice_design:
+                    self.output_queue.put(("system", f"Voice Design: {omni_voice_design}"))
             if trained_model_path:
                 self.output_queue.put(("system", f"Using trained voice model: {os.path.basename(trained_model_path)}"))
 
@@ -628,7 +721,10 @@ class VoiceChatApp:
                 trained_model_path=trained_model_path,
                 streaming_mode=streaming_enabled,
                 tts_engine=tts_engine,
-                qwen3_speaker=qwen3_speaker
+                qwen3_speaker=qwen3_speaker,
+                omni_language=omni_language,
+                omni_voice_design=omni_voice_design,
+                omni_speed=omni_speed
             )
             self.voice_chat = chat
 
@@ -683,6 +779,275 @@ class VoiceChatApp:
             self.train_folder_var.set(folder)
             self.scan_training_folder()
 
+    def on_data_source_change(self):
+        """Toggle between folder and single file modes"""
+        mode = self.data_source_mode.get()
+        if mode == "folder":
+            self.single_file_frame.pack_forget()
+            self.folder_widgets_frame.pack(fill=tk.X, pady=2)
+            self.folder_info_var.set("Select a folder containing audio files with matching .txt transcripts")
+        else:
+            self.folder_widgets_frame.pack_forget()
+            self.single_file_frame.pack(fill=tk.X, pady=2)
+            self.folder_info_var.set("Select a long audio file to preprocess into training segments")
+
+    def browse_single_audio(self):
+        """Open file picker for single audio file"""
+        filepath = filedialog.askopenfilename(
+            title="Select audio file to preprocess",
+            filetypes=[("Audio Files", "*.wav *.mp3 *.flac *.ogg *.m4a"), ("All Files", "*.*")]
+        )
+        if filepath:
+            self.single_audio_var.set(filepath)
+            # Get audio duration for info
+            try:
+                import soundfile as sf
+                info = sf.info(filepath)
+                duration_mins = info.duration / 60
+                self.folder_info_var.set(f"Selected: {os.path.basename(filepath)} ({duration_mins:.1f} minutes)")
+            except Exception as e:
+                self.folder_info_var.set(f"Selected: {os.path.basename(filepath)}")
+
+    def start_preprocessing(self):
+        """Start preprocessing in a background thread"""
+        audio_path = self.single_audio_var.get()
+        if not audio_path or not os.path.exists(audio_path):
+            messagebox.showerror("Error", "Please select a valid audio file")
+            return
+
+        # Disable button during processing
+        self.preprocess_btn.configure(state=tk.DISABLED)
+        self.train_progress_var.set(0)
+
+        # Clear log
+        self.train_log.configure(state=tk.NORMAL)
+        self.train_log.delete("1.0", tk.END)
+        self.train_log.configure(state=tk.DISABLED)
+
+        # Start preprocessing thread
+        self.preprocessing_running = True
+        preprocess_thread = threading.Thread(
+            target=self.run_preprocessing,
+            args=(audio_path,),
+            daemon=True
+        )
+        preprocess_thread.start()
+
+        # Start polling for output
+        self.poll_training_output()
+
+    def run_preprocessing(self, audio_path: str):
+        """Run WhisperX preprocessing to split audio into training segments"""
+        try:
+            import torch
+            import soundfile as sf
+            import numpy as np
+
+            self.train_log_message("=" * 50)
+            self.train_log_message("PREPROCESSING: Starting WhisperX transcription...")
+            self.train_log_message("=" * 50)
+            self.train_status_var.set("Preprocessing: Loading audio...")
+            self.update_train_progress(5)
+
+            # Load audio
+            audio_data, sample_rate = sf.read(audio_path)
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=1)  # Convert stereo to mono
+
+            duration_secs = len(audio_data) / sample_rate
+            self.train_log_message(f"Audio loaded: {duration_secs/60:.1f} minutes at {sample_rate}Hz")
+
+            # Resample to 16kHz if needed (WhisperX requirement)
+            if sample_rate != 16000:
+                self.train_log_message(f"Resampling from {sample_rate}Hz to 16000Hz...")
+                import librosa
+                audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
+                sample_rate = 16000
+
+            self.update_train_progress(10)
+            self.train_status_var.set("Preprocessing: Loading WhisperX...")
+
+            # Load WhisperX
+            import whisperx
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            whisper_model = self.preprocess_whisper_var.get()
+            self.train_log_message(f"Loading WhisperX model '{whisper_model}' on {device}...")
+
+            # Set up cache directory for model downloads
+            cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            self.train_log_message(f"Model cache directory: {cache_dir}")
+
+            try:
+                model = whisperx.load_model(
+                    whisper_model,
+                    device,
+                    compute_type="float16",
+                    download_root=cache_dir
+                )
+            except Exception as e:
+                self.train_log_message(f"Error loading model: {e}")
+                self.train_log_message("If download fails, try a smaller model (base/small) or check your internet connection.")
+                self.train_log_message("For large-v3, you may need to accept the license at: https://huggingface.co/openai/whisper-large-v3")
+                raise
+            self.update_train_progress(20)
+
+            # Save temp file for WhisperX (it needs a file path)
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                sf.write(f.name, audio_data, sample_rate, subtype='PCM_16')
+                temp_audio_path = f.name
+
+            self.train_status_var.set("Preprocessing: Transcribing with WhisperX...")
+            self.train_log_message("Running transcription (this may take a while for long audio)...")
+
+            # Transcribe
+            result = model.transcribe(temp_audio_path, batch_size=16, language="en")
+            self.update_train_progress(50)
+
+            # Get word-level timestamps with alignment
+            self.train_log_message("Aligning words for precise timestamps...")
+            self.train_status_var.set("Preprocessing: Aligning timestamps...")
+
+            try:
+                model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
+                result = whisperx.align(result["segments"], model_a, metadata, temp_audio_path, device)
+                del model_a  # Free memory
+            except Exception as e:
+                self.train_log_message(f"Warning: Alignment failed ({e}), using segment-level timestamps")
+
+            # Clean up WhisperX model to free VRAM
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            self.update_train_progress(60)
+
+            # Clean up temp file
+            try:
+                os.unlink(temp_audio_path)
+            except:
+                pass
+
+            segments = result.get("segments", [])
+            self.train_log_message(f"Found {len(segments)} segments from transcription")
+
+            if not segments:
+                self.train_log_message("ERROR: No segments found in transcription!")
+                self.train_status_var.set("Error: No speech detected")
+                return
+
+            # Create output folder
+            base_name = os.path.splitext(os.path.basename(audio_path))[0]
+            output_folder = os.path.join(os.path.dirname(audio_path), f"{base_name}_segments")
+            os.makedirs(output_folder, exist_ok=True)
+            self.train_log_message(f"Output folder: {output_folder}")
+
+            self.train_status_var.set("Preprocessing: Splitting audio segments...")
+            self.update_train_progress(65)
+
+            # Reload original audio at original sample rate for better quality output
+            audio_data_orig, sr_orig = sf.read(audio_path)
+            if len(audio_data_orig.shape) > 1:
+                audio_data_orig = audio_data_orig.mean(axis=1)
+
+            # Process segments - merge short ones, split long ones
+            min_duration = self.min_segment_var.get()
+            max_duration = self.max_segment_var.get()
+
+            processed_segments = []
+            current_segment = None
+
+            for seg in segments:
+                start = seg.get("start", 0)
+                end = seg.get("end", 0)
+                text = seg.get("text", "").strip()
+
+                if not text:
+                    continue
+
+                duration = end - start
+
+                if current_segment is None:
+                    current_segment = {"start": start, "end": end, "text": text}
+                elif current_segment["end"] - current_segment["start"] + duration < max_duration:
+                    # Merge with current segment
+                    current_segment["end"] = end
+                    current_segment["text"] += " " + text
+                else:
+                    # Save current and start new
+                    if current_segment["end"] - current_segment["start"] >= min_duration:
+                        processed_segments.append(current_segment)
+                    current_segment = {"start": start, "end": end, "text": text}
+
+            # Don't forget last segment
+            if current_segment and current_segment["end"] - current_segment["start"] >= min_duration:
+                processed_segments.append(current_segment)
+
+            self.train_log_message(f"Processed into {len(processed_segments)} training segments")
+            self.update_train_progress(70)
+
+            # Save segments as audio + text files
+            saved_count = 0
+            for i, seg in enumerate(processed_segments):
+                if not self.preprocessing_running:
+                    self.train_log_message("Preprocessing cancelled.")
+                    return
+
+                start_sample = int(seg["start"] * sr_orig)
+                end_sample = int(seg["end"] * sr_orig)
+                segment_audio = audio_data_orig[start_sample:end_sample]
+
+                # Generate filenames
+                segment_name = f"segment_{i+1:04d}"
+                audio_out_path = os.path.join(output_folder, f"{segment_name}.wav")
+                text_out_path = os.path.join(output_folder, f"{segment_name}.txt")
+
+                # Save audio as high-quality PCM WAV (16-bit, lossless)
+                sf.write(audio_out_path, segment_audio, sr_orig, subtype='PCM_16')
+
+                # Save transcript
+                with open(text_out_path, 'w', encoding='utf-8') as f:
+                    f.write(seg["text"])
+
+                saved_count += 1
+
+                # Update progress
+                progress = 70 + (25 * (i + 1) / len(processed_segments))
+                self.update_train_progress(progress)
+
+                if (i + 1) % 10 == 0:
+                    self.train_log_message(f"  Saved {i+1}/{len(processed_segments)} segments...")
+
+            self.update_train_progress(95)
+            self.train_log_message("=" * 50)
+            self.train_log_message(f"PREPROCESSING COMPLETE!")
+            self.train_log_message(f"  Segments saved: {saved_count}")
+            self.train_log_message(f"  Output folder: {output_folder}")
+            self.train_log_message("=" * 50)
+            self.train_log_message("")
+            self.train_log_message("Now switch to 'Folder with pairs' mode and select the output folder,")
+            self.train_log_message("or the folder has been auto-selected for you.")
+
+            # Auto-select the output folder and switch to folder mode
+            self.train_folder_var.set(output_folder)
+            self.data_source_mode.set("folder")
+            self.root.after(0, self.on_data_source_change)
+            self.root.after(100, self.scan_training_folder)
+
+            self.update_train_progress(100)
+            self.train_status_var.set(f"Preprocessing complete: {saved_count} segments")
+
+        except Exception as e:
+            self.train_log_message(f"ERROR: {str(e)}")
+            import traceback
+            self.train_log_message(traceback.format_exc())
+            self.train_status_var.set(f"Error: {str(e)[:50]}")
+
+        finally:
+            self.preprocessing_running = False
+            self.root.after(0, lambda: self.preprocess_btn.configure(state=tk.NORMAL))
+
     def scan_training_folder(self):
         """Scan folder for audio+transcript pairs"""
         folder = self.train_folder_var.get()
@@ -705,12 +1070,24 @@ class VoiceChatApp:
         self.training_pairs = pairs
         self.folder_info_var.set(f"Found {len(pairs)} audio+transcript pairs")
 
-        # Update sample count max
+        # Update sample count max and auto-fill voice name
         if pairs:
             max_samples = len(pairs)
             self.sample_spin.configure(to=max_samples)
-            self.sample_count_var.set(min(max_samples, 10))
+            # Auto-set to ALL samples (not just 10)
+            self.sample_count_var.set(max_samples)
+
+            # Auto-fill voice name from folder name if empty
+            if not self.voice_name_var.get().strip():
+                folder_name = os.path.basename(folder.rstrip('/\\'))
+                # Clean up common suffixes
+                for suffix in ['_segments', '_training', '_data']:
+                    if folder_name.lower().endswith(suffix):
+                        folder_name = folder_name[:-len(suffix)]
+                self.voice_name_var.set(folder_name)
+
             self.train_log_message(f"Found {len(pairs)} training samples in {folder}")
+            self.train_log_message(f"Voice name: {self.voice_name_var.get()}, Samples: {max_samples}")
         else:
             self.train_log_message("No valid audio+transcript pairs found. Make sure each audio file has a matching .txt file.")
 
@@ -956,7 +1333,7 @@ class VoiceChatApp:
         except queue.Empty:
             pass
 
-        if self.training_running:
+        if self.training_running or self.preprocessing_running:
             self.root.after(100, self.poll_training_output)
 
     def cancel_training(self):
@@ -998,7 +1375,7 @@ class VoiceChatApp:
 class SimplifiedVoiceChat:
     """Simplified voice chat that reports to the UI"""
 
-    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True, tts_engine="MOSS-TTS", qwen3_speaker="serena"):
+    def __init__(self, output_queue, system_prompt, whisper_model, input_mode, ollama_model, voice_path, fast_mode, trained_model_path=None, streaming_mode=True, tts_engine="MOSS-TTS", qwen3_speaker="serena", omni_language="en", omni_voice_design="", omni_speed=1.0):
         import torch
         self.output_queue = output_queue
         self.system_prompt = system_prompt
@@ -1016,6 +1393,9 @@ class SimplifiedVoiceChat:
         # TTS engine settings
         self.tts_engine_name = tts_engine
         self.qwen3_speaker = qwen3_speaker
+        self.omni_language = omni_language
+        self.omni_voice_design = omni_voice_design
+        self.omni_speed = omni_speed
         self.tts_engine = None  # Will be loaded lazily
 
         # Models
@@ -1078,12 +1458,21 @@ class SimplifiedVoiceChat:
         if self.whisper_model is None:
             self.log("status", "Loading WhisperX...")
             import whisperx
-            self.whisper_model = whisperx.load_model(
-                self.whisper_model_name,
-                self.device,
-                compute_type="float16"
-            )
-            self.log("system", f"WhisperX {self.whisper_model_name} loaded")
+            # Try float16 first, fall back to int8 or float32 if not supported
+            for compute_type in ["float16", "int8", "float32"]:
+                try:
+                    self.whisper_model = whisperx.load_model(
+                        self.whisper_model_name,
+                        self.device,
+                        compute_type=compute_type
+                    )
+                    self.log("system", f"WhisperX {self.whisper_model_name} loaded (compute_type={compute_type})")
+                    break
+                except ValueError as e:
+                    if "compute type" in str(e).lower() and compute_type != "float32":
+                        self.log("system", f"WhisperX: {compute_type} not supported, trying next...")
+                        continue
+                    raise
 
     def load_tts(self):
         if self.tts_engine is None:
@@ -1100,6 +1489,22 @@ class SimplifiedVoiceChat:
                     dtype=self.dtype,
                     speaker=self.qwen3_speaker
                 )
+            elif self.tts_engine_name == "OmniVoice":
+                # Get absolute voice path for pre-loading clone prompt
+                omni_voice_path = None
+                if self.voice_path and self.voice_path != "custom":
+                    vp = os.path.abspath(self.voice_path) if os.path.exists(str(self.voice_path)) else None
+                    if vp:
+                        omni_voice_path = vp
+                self.tts_engine = create_tts_engine(
+                    self.tts_engine_name,
+                    device=self.device,
+                    dtype=self.dtype,
+                    language=self.omni_language,
+                    voice_design=self.omni_voice_design,
+                    speed=self.omni_speed,
+                    voice_path=omni_voice_path
+                )
             else:
                 # MOSS-TTS
                 self.tts_engine = create_tts_engine(
@@ -1115,6 +1520,10 @@ class SimplifiedVoiceChat:
             self.log("system", f"{self.tts_engine_name} loaded on {self.device}")
             if self.tts_engine_name == "Qwen3-TTS":
                 self.log("system", f"Speaker: {self.qwen3_speaker}")
+            elif self.tts_engine_name == "OmniVoice":
+                self.log("system", f"Language: {self.omni_language}, Speed: {self.omni_speed}")
+                if self.omni_voice_design:
+                    self.log("system", f"Voice Design: {self.omni_voice_design}")
 
     def transcribe(self, audio):
         import numpy as np
@@ -1165,6 +1574,18 @@ class SimplifiedVoiceChat:
         effective_system_prompt = self.system_prompt
         if self.fast_mode:
             effective_system_prompt += "\n\nRespond briefly in 1-2 sentences. Be direct and conversational."
+
+        # Add OmniVoice non-verbal expression instructions when using OmniVoice TTS
+        if self.tts_engine_name == "OmniVoice":
+            effective_system_prompt += (
+                "\n\nIMPORTANT: Your text will be spoken aloud using an expressive TTS engine. "
+                "You can use these inline non-verbal tags naturally in your responses to make speech more expressive: "
+                "[laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], "
+                "[surprise-ah], [surprise-oh], [surprise-wa], [dissatisfaction-hnn]. "
+                "Use them sparingly and naturally, e.g. '[laughter] That's a great point.' or "
+                "'[sigh] I know what you mean.' "
+                "For English pronunciation corrections, use CMU dictionary format in brackets like [IH1 T] for 'it'."
+            )
 
         messages = [{"role": "system", "content": effective_system_prompt}]
         messages.extend(self.conversation_history[-10:])
@@ -1245,7 +1666,20 @@ class SimplifiedVoiceChat:
 
         self.conversation_history.append({"role": "user", "content": user_message})
 
-        messages = [{"role": "system", "content": self.system_prompt}]
+        # Build effective system prompt with TTS-specific instructions
+        effective_prompt = self.system_prompt
+        if self.tts_engine_name == "OmniVoice":
+            effective_prompt += (
+                "\n\nIMPORTANT: Your text will be spoken aloud using an expressive TTS engine. "
+                "You can use these inline non-verbal tags naturally in your responses to make speech more expressive: "
+                "[laughter], [sigh], [confirmation-en], [question-en], [question-ah], [question-oh], "
+                "[surprise-ah], [surprise-oh], [surprise-wa], [dissatisfaction-hnn]. "
+                "Use them sparingly and naturally, e.g. '[laughter] That's a great point.' or "
+                "'[sigh] I know what you mean.' "
+                "For English pronunciation corrections, use CMU dictionary format in brackets like [IH1 T] for 'it'."
+            )
+
+        messages = [{"role": "system", "content": effective_prompt}]
         messages.extend(self.conversation_history[-10:])
 
         self.log("system", "[DEBUG] Starting LLM stream...")
@@ -1337,6 +1771,7 @@ class SimplifiedVoiceChat:
         import threading
         import sounddevice as sd
         import torch
+        import keyboard
 
         self.log("system", "[DEBUG] Using STREAMING mode (parallel)")
 
@@ -1376,7 +1811,7 @@ class SimplifiedVoiceChat:
         self.log("system", f"[DEBUG] STT: {stt_time:.2f}s")
 
         # Streaming LLM->TTS with parallel processing
-        self.log("status", "Responding (streaming)...")
+        self.log("status", "Responding (streaming)... [SPACE to interrupt]")
         self.load_tts()
 
         # Queue for text chunks from LLM -> TTS processor
@@ -1384,6 +1819,7 @@ class SimplifiedVoiceChat:
         # Queue for audio chunks from TTS -> audio player
         audio_queue = queue.Queue()
         playback_done = threading.Event()
+        interrupted = threading.Event()  # Interrupt signal
         full_response_parts = []
         t_first_audio = [None]  # Use list to allow mutation in thread
         turn_seed = int(time.time()) % 10000
@@ -1391,9 +1827,14 @@ class SimplifiedVoiceChat:
         def tts_processor():
             """Process text chunks into audio in a separate thread"""
             chunk_count = 0
-            while True:
-                item = text_queue.get()
+            while not interrupted.is_set():
+                try:
+                    item = text_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
                 if item is None:  # Sentinel to stop
+                    break
+                if interrupted.is_set():
                     break
                 text_chunk = item
                 chunk_count += 1
@@ -1407,6 +1848,9 @@ class SimplifiedVoiceChat:
                     self.log("system", f"[DEBUG] TTS chunk {chunk_count} starting: '{text_chunk[:30]}...'")
                     audio_chunk = self.synthesize_speech(text_chunk)
                     t_tts_end = time.time()
+
+                    if interrupted.is_set():
+                        break
 
                     if len(audio_chunk) > 0:
                         if t_first_audio[0] is None:
@@ -1426,15 +1870,30 @@ class SimplifiedVoiceChat:
             sample_rate = self.tts_engine.get_sample_rate() if self.tts_engine else 24000
             self.log("system", f"[DEBUG] Audio player started, sample_rate={sample_rate}")
             while True:
-                audio_chunk = audio_queue.get()
+                if interrupted.is_set():
+                    sd.stop()
+                    self.log("system", "[DEBUG] Audio player interrupted")
+                    break
+                try:
+                    audio_chunk = audio_queue.get(timeout=0.1)
+                except queue.Empty:
+                    continue
                 if audio_chunk is None:
                     self.log("system", "[DEBUG] Audio player received stop signal")
+                    break
+                if interrupted.is_set():
+                    sd.stop()
                     break
                 try:
                     self.log("system", f"[DEBUG] Playing audio: {len(audio_chunk)} samples, {len(audio_chunk)/sample_rate:.2f}s")
                     sd.play(audio_chunk, sample_rate)
-                    sd.wait()
-                    self.log("system", "[DEBUG] Audio playback complete")
+                    # Poll for interrupt during playback instead of blocking
+                    while sd.get_stream().active:
+                        if interrupted.is_set():
+                            sd.stop()
+                            self.log("system", "[DEBUG] Playback interrupted mid-audio")
+                            break
+                        time.sleep(0.05)
                 except Exception as e:
                     self.log("error", f"Playback error: {e}")
             playback_done.set()
@@ -1448,7 +1907,7 @@ class SimplifiedVoiceChat:
         # Stream LLM and feed text chunks to TTS processor
         chunk_count = 0
         for text_chunk in self.stream_chat_ollama(user_text):
-            if not self.running:
+            if not self.running or interrupted.is_set():
                 break
             full_response_parts.append(text_chunk)
             chunk_count += 1
@@ -1462,11 +1921,38 @@ class SimplifiedVoiceChat:
         full_response = " ".join(full_response_parts)
         self.log("assistant", full_response)
 
-        # Wait for playback to complete
-        playback_done.wait(timeout=120)
+        # Monitor for interrupt while waiting for playback
+        while not playback_done.is_set():
+            if keyboard.is_pressed("space") and not interrupted.is_set():
+                interrupted.set()
+                sd.stop()
+                self.log("system", "[Interrupted by user]")
+                # Drain queues
+                while not text_queue.empty():
+                    try:
+                        text_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                while not audio_queue.empty():
+                    try:
+                        audio_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                audio_queue.put(None)  # Ensure player exits
+                break
+            if not self.running:
+                interrupted.set()
+                sd.stop()
+                break
+            time.sleep(0.05)
+
+        playback_done.wait(timeout=5)
 
         total_time = time.time() - t_start
-        self.log("system", f"[DEBUG] TOTAL: {total_time:.2f}s ({chunk_count} chunks)")
+        if interrupted.is_set():
+            self.log("system", f"[DEBUG] TOTAL (interrupted): {total_time:.2f}s ({chunk_count} chunks)")
+        else:
+            self.log("system", f"[DEBUG] TOTAL: {total_time:.2f}s ({chunk_count} chunks)")
         self.log("status", "Running - Hold SPACE to speak" if self.input_mode == "ptt" else "Running - Listening...")
 
     def process_turn(self):
@@ -1528,11 +2014,14 @@ class SimplifiedVoiceChat:
             return
 
         # Speak
-        self.log("status", "Speaking...")
+        self.log("status", "Speaking... [SPACE to interrupt]")
         t_tts_start = time.time()
         tts_time = 0
         play_time = 0
+        was_interrupted = False
         try:
+            import sounddevice as sd
+            import keyboard
             audio_response = self.synthesize_speech(response_text)
             t_tts_end = time.time()
             tts_time = t_tts_end - t_tts_start
@@ -1541,10 +2030,21 @@ class SimplifiedVoiceChat:
             if len(audio_response) > 0:
                 t_play_start = time.time()
                 sample_rate = self.tts_engine.get_sample_rate() if self.tts_engine else 24000
-                play_audio(audio_response, sample_rate=sample_rate)
+                sd.play(audio_response, sample_rate)
+                # Poll for interrupt during playback
+                while sd.get_stream().active:
+                    if keyboard.is_pressed("space"):
+                        sd.stop()
+                        was_interrupted = True
+                        self.log("system", "[Interrupted by user]")
+                        break
+                    if not self.running:
+                        sd.stop()
+                        break
+                    time.sleep(0.05)
                 t_play_end = time.time()
                 play_time = t_play_end - t_play_start
-                self.log("system", f"[DEBUG] Playback: {play_time:.2f}s")
+                self.log("system", f"[DEBUG] Playback: {play_time:.2f}s{' (interrupted)' if was_interrupted else ''}")
         except Exception as e:
             self.log("error", f"TTS error: {e}")
             tts_time = time.time() - t_tts_start

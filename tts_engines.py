@@ -1,6 +1,6 @@
 """
 TTS Engine Abstraction Layer
-Supports multiple TTS backends: MOSS-TTS and Qwen3-TTS
+Supports multiple TTS backends: MOSS-TTS, Qwen3-TTS, and OmniVoice
 """
 
 import os
@@ -366,6 +366,270 @@ class Qwen3TTSEngine(TTSEngine):
             raise ValueError(f"Unknown speaker: {speaker}. Available: {self.SPEAKERS}")
 
 
+class OmniVoiceEngine(TTSEngine):
+    """OmniVoice Engine - multilingual zero-shot TTS with voice cloning and voice design (600+ languages)"""
+
+    COMMON_LANGUAGES = [
+        "en", "zh", "ja", "ko", "fr", "de", "es", "pt", "ru", "ar",
+        "it", "nl", "pl", "tr", "vi", "th", "id", "hi", "sv", "cs"
+    ]
+
+    def __init__(self, device: str = "cuda", dtype: torch.dtype = torch.bfloat16,
+                 language: str = "en", voice_design: str = "",
+                 num_step: int = 16, guidance_scale: float = 2.0, speed: float = 1.0,
+                 voice_path: str = None):
+        super().__init__(device, dtype)
+        self.model = None
+        self.language = language
+        self.voice_design = voice_design
+        self.num_step = num_step
+        self.guidance_scale = guidance_scale
+        self.speed = speed
+        self.voice_path = voice_path  # Pre-set voice for cloning at load time
+        self._cached_voice_path = None
+        self._cached_clone_prompt = None
+
+    @property
+    def name(self) -> str:
+        return "OmniVoice"
+
+    def get_sample_rate(self) -> int:
+        # Try to get from model config, fallback to 24000
+        if self.model is not None:
+            for attr in ['sample_rate', 'sampling_rate', 'audio_sample_rate']:
+                sr = getattr(self.model, attr, None) or getattr(getattr(self.model, 'config', None), attr, None)
+                if sr:
+                    return int(sr)
+        return 24000
+
+    def load(self) -> None:
+        if self.loaded:
+            return
+
+        # Patch torchaudio to use soundfile backend instead of torchcodec (avoids FFmpeg dependency)
+        self._patch_torchaudio()
+
+        try:
+            from omnivoice import OmniVoice
+        except ImportError:
+            raise ImportError(
+                "OmniVoice not installed. Install with: pip install omnivoice"
+            )
+        print("[DEBUG] Loading OmniVoice model...")
+        self.model = OmniVoice.from_pretrained("k2-fsa/OmniVoice")
+
+        # Move model to GPU if available
+        if self.device == "cuda" and torch.cuda.is_available():
+            try:
+                self.model = self.model.to(self.device)
+                print(f"[DEBUG] OmniVoice moved to {self.device}")
+            except Exception as e:
+                print(f"[DEBUG] OmniVoice: Could not move to {self.device}: {e}")
+
+        # Log device info
+        try:
+            params = next(self.model.parameters())
+            print(f"[DEBUG] OmniVoice model device: {params.device}, dtype: {params.dtype}")
+        except StopIteration:
+            pass
+
+        self.loaded = True
+        print("[DEBUG] OmniVoice loaded")
+
+        # Pre-create voice clone prompt at startup so synthesis is fast
+        if self.voice_path and os.path.exists(self.voice_path):
+            import time as _time
+            print(f"[DEBUG] OmniVoice: Pre-creating voice clone prompt from {self.voice_path}...")
+            t = _time.time()
+            self._cached_clone_prompt = self.model.create_voice_clone_prompt(self.voice_path)
+            self._cached_voice_path = self.voice_path
+            print(f"[DEBUG] OmniVoice: Clone prompt ready in {_time.time()-t:.1f}s")
+
+    @staticmethod
+    def _patch_torchaudio():
+        """Block torchcodec and patch torchaudio to use soundfile, avoiding FFmpeg dependency"""
+        import sys
+        import types
+        import soundfile as sf
+        import numpy as _np
+
+        # Block torchcodec by injecting dummy modules into sys.modules BEFORE torchaudio imports it
+        if 'torchcodec' not in sys.modules or not hasattr(sys.modules.get('torchcodec', None), '_is_real'):
+            # Create dummy AudioDecoder class that torchaudio expects to import
+            class _DummyAudioDecoder:
+                def __init__(self, *args, **kwargs):
+                    raise RuntimeError("torchcodec disabled - using soundfile backend instead")
+
+            class _DummyMetadata:
+                pass
+
+            dummy = types.ModuleType('torchcodec')
+            dummy.decoders = types.ModuleType('torchcodec.decoders')
+            dummy.decoders.AudioDecoder = _DummyAudioDecoder
+            dummy._core = types.ModuleType('torchcodec._core')
+            dummy._core.AudioStreamMetadata = _DummyMetadata
+            dummy._core.VideoStreamMetadata = _DummyMetadata
+            sys.modules['torchcodec'] = dummy
+            sys.modules['torchcodec.decoders'] = dummy.decoders
+            sys.modules['torchcodec._core'] = dummy._core
+            print("[DEBUG] OmniVoice: Blocked torchcodec with dummy modules")
+
+        import torchaudio
+
+        # Check if already patched
+        if getattr(torchaudio, '_sf_patched', False):
+            return
+
+        def _sf_load(filepath, *args, **kwargs):
+            """Load audio using soundfile instead of torchaudio/torchcodec"""
+            audio_data, sample_rate = sf.read(str(filepath))
+            if len(audio_data.shape) == 1:
+                audio_data = audio_data[_np.newaxis, :]  # (1, samples)
+            else:
+                audio_data = audio_data.T  # (channels, samples)
+            return torch.from_numpy(audio_data.astype(_np.float32)), sample_rate
+
+        def _sf_save(filepath, waveform, sample_rate, *args, **kwargs):
+            """Save audio using soundfile instead of torchaudio/torchcodec"""
+            audio_np = waveform.cpu().numpy()
+            if audio_np.ndim == 2:
+                audio_np = audio_np.T  # (samples, channels)
+            sf.write(str(filepath), audio_np, int(sample_rate), subtype='PCM_16')
+
+        def _sf_info(filepath, *args, **kwargs):
+            """Get audio info using soundfile"""
+            info = sf.info(str(filepath))
+            class AudioInfo:
+                def __init__(self, i):
+                    self.sample_rate = i.samplerate
+                    self.num_frames = i.frames
+                    self.num_channels = i.channels
+            return AudioInfo(info)
+
+        torchaudio.load = _sf_load
+        torchaudio.save = _sf_save
+        torchaudio.info = _sf_info
+        torchaudio._sf_patched = True
+
+        # Also patch functional.resample to use torch interpolation
+        if hasattr(torchaudio, 'functional'):
+            _orig_resample = getattr(torchaudio.functional, 'resample', None)
+            def _torch_resample(waveform, orig_freq, new_freq, **kwargs):
+                if orig_freq == new_freq:
+                    return waveform
+                import torch.nn.functional as F
+                new_len = int(waveform.shape[-1] * new_freq / orig_freq)
+                if waveform.dim() == 1:
+                    return F.interpolate(waveform.unsqueeze(0).unsqueeze(0), size=new_len, mode='linear', align_corners=False).squeeze(0).squeeze(0)
+                elif waveform.dim() == 2:
+                    return F.interpolate(waveform.unsqueeze(0), size=new_len, mode='linear', align_corners=False).squeeze(0)
+                return F.interpolate(waveform, size=new_len, mode='linear', align_corners=False)
+            torchaudio.functional.resample = _torch_resample
+
+        print("[DEBUG] OmniVoice: Patched torchaudio to use soundfile backend")
+
+    def unload(self) -> None:
+        if self.model is not None:
+            del self.model
+            self.model = None
+        self._cached_clone_prompt = None
+        self._cached_voice_path = None
+        self.loaded = False
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        import gc
+        gc.collect()
+        print("[DEBUG] OmniVoice unloaded, GPU memory freed")
+
+    def synthesize(self, text: str, voice_path: Optional[str] = None) -> np.ndarray:
+        import time as _time
+        self.load()
+
+        generate_kwargs = {
+            "num_step": self.num_step,
+            "guidance_scale": self.guidance_scale,
+            "speed": self.speed,
+        }
+
+        print(f"[DEBUG] OmniVoice.synthesize: text='{text[:60]}...', language={self.language}")
+        print(f"[DEBUG] OmniVoice.synthesize: voice_path={voice_path}, voice_design='{self.voice_design[:30] if self.voice_design else ''}'")
+        print(f"[DEBUG] OmniVoice.synthesize: num_step={self.num_step}, guidance_scale={self.guidance_scale}, speed={self.speed}")
+
+        t_start = _time.time()
+
+        if voice_path and os.path.exists(voice_path):
+            # Voice cloning - cache the clone prompt for the same voice_path
+            if voice_path != self._cached_voice_path or self._cached_clone_prompt is None:
+                print(f"[DEBUG] OmniVoice: Creating voice clone prompt from {voice_path}...")
+                t_clone = _time.time()
+                self._cached_clone_prompt = self.model.create_voice_clone_prompt(voice_path)
+                self._cached_voice_path = voice_path
+                print(f"[DEBUG] OmniVoice: Clone prompt created in {_time.time()-t_clone:.2f}s")
+                print(f"[DEBUG] OmniVoice: Clone prompt type={type(self._cached_clone_prompt)}")
+                if hasattr(self._cached_clone_prompt, '__len__'):
+                    print(f"[DEBUG] OmniVoice: Clone prompt len={len(self._cached_clone_prompt)}")
+                if hasattr(self._cached_clone_prompt, 'keys'):
+                    print(f"[DEBUG] OmniVoice: Clone prompt keys={list(self._cached_clone_prompt.keys())}")
+            else:
+                print(f"[DEBUG] OmniVoice: Using cached clone prompt")
+            print(f"[DEBUG] OmniVoice: Generating with voice cloning (prompt type={type(self._cached_clone_prompt).__name__})...")
+            audio = self.model.generate(
+                text, language=self.language, voice_clone_prompt=self._cached_clone_prompt,
+                **generate_kwargs
+            )
+        elif self.voice_design:
+            print(f"[DEBUG] OmniVoice: Generating with voice design: '{self.voice_design}'...")
+            audio = self.model.generate(
+                text, language=self.language, instruct=self.voice_design,
+                **generate_kwargs
+            )
+        else:
+            print(f"[DEBUG] OmniVoice: Generating with default voice...")
+            audio = self.model.generate(
+                text, language=self.language, **generate_kwargs
+            )
+
+        t_gen = _time.time() - t_start
+        print(f"[DEBUG] OmniVoice: Generation completed in {t_gen:.2f}s")
+        print(f"[DEBUG] OmniVoice: Output type={type(audio)}, shape/len={getattr(audio, 'shape', None) or (len(audio) if hasattr(audio, '__len__') else 'unknown')}")
+
+        # Convert output to 1D float32 numpy array
+        if isinstance(audio, torch.Tensor):
+            print(f"[DEBUG] OmniVoice: Tensor output, shape={audio.shape}, dtype={audio.dtype}")
+            audio_np = audio.squeeze().cpu().float().numpy()
+        elif isinstance(audio, tuple):
+            print(f"[DEBUG] OmniVoice: Tuple output, len={len(audio)}, types={[type(x).__name__ for x in audio]}")
+            item = audio[0]
+            if isinstance(item, torch.Tensor):
+                audio_np = item.squeeze().cpu().float().numpy()
+            else:
+                audio_np = np.array(item).flatten()
+        elif isinstance(audio, list):
+            print(f"[DEBUG] OmniVoice: List output, len={len(audio)}")
+            if len(audio) > 0 and isinstance(audio[0], torch.Tensor):
+                print(f"[DEBUG] OmniVoice: List[0] shape={audio[0].shape}, dtype={audio[0].dtype}")
+                audio_np = torch.cat([a.squeeze() for a in audio]).cpu().float().numpy()
+            else:
+                audio_np = np.concatenate([np.array(a).flatten() for a in audio])
+        else:
+            audio_np = np.array(audio).flatten()
+
+        if audio_np.ndim > 1:
+            print(f"[DEBUG] OmniVoice: Flattening from shape {audio_np.shape}")
+            audio_np = audio_np.flatten()
+
+        # Normalize to prevent clipping
+        max_val = np.abs(audio_np).max()
+        print(f"[DEBUG] OmniVoice: Pre-normalize max={max_val:.4f}, min={audio_np.min():.4f}")
+        if max_val > 0:
+            audio_np = audio_np / max_val * 0.95
+
+        sr = self.get_sample_rate()
+        print(f"[DEBUG] OmniVoice: Final audio: {len(audio_np)} samples, {len(audio_np)/sr:.2f}s at {sr}Hz")
+        return audio_np.astype(np.float32)
+
+
 # Factory function to create TTS engines
 def create_tts_engine(engine_name: str, device: str = "cuda",
                        dtype: torch.dtype = torch.bfloat16,
@@ -374,7 +638,7 @@ def create_tts_engine(engine_name: str, device: str = "cuda",
     Create a TTS engine by name.
 
     Args:
-        engine_name: "MOSS-TTS" or "Qwen3-TTS"
+        engine_name: "MOSS-TTS", "Qwen3-TTS", or "OmniVoice"
         device: Device to use ("cuda" or "cpu")
         dtype: Data type for model
         **kwargs: Additional arguments for specific engines
@@ -385,6 +649,7 @@ def create_tts_engine(engine_name: str, device: str = "cuda",
     engines = {
         "MOSS-TTS": MOSSTTSEngine,
         "Qwen3-TTS": Qwen3TTSEngine,
+        "OmniVoice": OmniVoiceEngine,
     }
 
     if engine_name not in engines:
@@ -394,4 +659,4 @@ def create_tts_engine(engine_name: str, device: str = "cuda",
 
 
 # Available TTS engines for UI
-TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS"]
+TTS_ENGINE_OPTIONS = ["MOSS-TTS", "Qwen3-TTS", "OmniVoice"]

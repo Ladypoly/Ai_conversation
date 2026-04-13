@@ -59,8 +59,8 @@ class AudioRecorder:
         if self.level_callback is not None:
             # Calculate RMS level
             rms = np.sqrt(np.mean(indata ** 2))
-            # Normalize to 0.0-1.0 range (assuming max RMS around 0.5 for typical speech)
-            level = min(1.0, rms * 3.0)
+            # Normalize to 0.0-1.0 range with higher sensitivity for typical speech levels
+            level = min(1.0, rms * 15.0)
             try:
                 self.level_callback(level)
             except Exception:
